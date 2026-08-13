@@ -1,0 +1,10 @@
+{
+  "name": "geo-tracker",
+  "dependencies": {
+    "playwright": "^1.62.1",
+    "puppeteer-core": "^25.6.0"
+  },
+  "description": "Track whether AI answer engines mention and cite you. API and SERP surfaces run under bun; the consumer-app surfaces need a real browser.",
+  "type": "module",
+  "license": "MIT"
+}
