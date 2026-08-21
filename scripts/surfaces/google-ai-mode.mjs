@@ -98,9 +98,14 @@ async function openSession() {
     return { close: () => browser.close(), page, openedAt: Date.now(), remote: false }
   }
 
+  // Same 180s default protocolTimeout trap that wedged google-aio on Aug 17: a
+  // dead hosted session makes every protocol call hang for three minutes instead
+  // of failing. This file still carries its own copy of the session logic; when
+  // it folds onto cdp-session.mjs this constant goes with it.
   const browser = await puppeteer.connect({
     browserWSEndpoint: cdpUrl(),
-    headers: { Authorization: `Bearer ${process.env.STRING_API_KEY}` }
+    headers: { Authorization: `Bearer ${process.env.STRING_API_KEY}` },
+    protocolTimeout: 30_000
   })
   const page = (await browser.pages())[0] ?? (await browser.newPage())
   await page.setViewport({ width: 1280, height: 900 })

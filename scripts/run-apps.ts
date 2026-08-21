@@ -369,6 +369,10 @@ for (const surface of selected) {
           alerts.push(`${surface.model}: session is logged out, weekly pass did not run. Re-auth with \`make setup-${surface.model.replace("-app", "")}\`.`);
           break;
         }
+        if (error?.code === "SESSION_POOL_DEAD") {
+          alerts.push(`${surface.model}: hosted CDP browser (request.usestring.ai) stopped answering after 3 reconnects - pass stopped early, remaining questions unmeasured.`);
+          break;
+        }
         if (error?.code === "INCOGNITO_UNAVAILABLE") {
           alerts.push(`${surface.model}: incognito chat entry point not found - refusing to measure in normal chats. Selectors in the surface file need updating.`);
           break;

@@ -33,6 +33,18 @@ import { chromium } from 'playwright'
 /** Drop bytes we never read. Bandwidth is what the hosted browser bills. */
 const SKIP_TYPES = new Set(['image', 'font', 'media'])
 
+// Puppeteer's default protocolTimeout is 180s. On Aug 17 the hosted endpoint
+// started accepting the websocket while the browser behind it was already gone,
+// so the first protocol call (Target.getBrowserContexts) never answered and each
+// question burned the full three minutes before failing. 26 of 50 questions went
+// that way, all after one dead reconnect. 30s is well above a healthy connect
+// (measured at 1.2s) and turns a wedged session into a fast failure.
+const PROTOCOL_TIMEOUT_MS = 30_000
+
+// After this many opens in a row fail, the endpoint is down rather than flaky.
+// Keep going and every remaining question pays the timeout for the same answer.
+const MAX_CONSECUTIVE_OPEN_FAILURES = 3
+
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
@@ -53,6 +65,7 @@ export function createSessionPool({
   country = 'US',
 } = {}) {
   let session = null
+  let consecutiveOpenFailures = 0
 
   const cdpUrl = () =>
     `wss://request.usestring.ai/v1/wss?${new URLSearchParams({ proxy, countryCode: country })}`
@@ -79,9 +92,21 @@ export function createSessionPool({
     const browser = await puppeteer.connect({
       browserWSEndpoint: cdpUrl(),
       headers: { Authorization: `Bearer ${process.env.STRING_API_KEY}` },
+      protocolTimeout: PROTOCOL_TIMEOUT_MS,
     })
-    const page = (await browser.pages())[0] ?? (await browser.newPage())
-    await page.setViewport({ width: 1280, height: 900 })
+
+    // The websocket connecting proves nothing: the endpoint accepts it even when
+    // the remote browser is gone. The first protocol call is where that shows up,
+    // so make it here and refuse to hand back a dead session.
+    let page
+    try {
+      page = (await browser.pages())[0] ?? (await browser.newPage())
+      await page.setViewport({ width: 1280, height: 900 })
+    } catch (e) {
+      await Promise.resolve(browser.disconnect()).catch(() => {})
+      throw new Error(`hosted browser accepted the socket but did not answer: ${e?.message ?? e}`)
+    }
+
     await page.setRequestInterception(true)
     page.on('request', (req) => {
       if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
@@ -105,7 +130,28 @@ export function createSessionPool({
       )
     }
     await close()
-    session = await open()
+
+    // Back off between reconnects. A hosted browser that just dropped us is
+    // often still tearing the old session down, and reconnecting into that
+    // window is how the wedged state got reached in the first place.
+    if (consecutiveOpenFailures > 0) {
+      await sleep(Math.min(2000 * 2 ** (consecutiveOpenFailures - 1), 15_000))
+    }
+
+    try {
+      session = await open()
+      consecutiveOpenFailures = 0
+    } catch (e) {
+      consecutiveOpenFailures += 1
+      if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
+        const err = new Error(
+          `hosted browser unreachable after ${consecutiveOpenFailures} attempts: ${e?.message ?? e}`
+        )
+        err.code = 'SESSION_POOL_DEAD'
+        throw err
+      }
+      throw e
+    }
     return session
   }
 

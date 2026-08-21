@@ -22,7 +22,14 @@ CREATE TABLE IF NOT EXISTS runs (
   run_ts TEXT NOT NULL, -- ISO 8601 UTC
   raw_answer TEXT, -- full answer text (JSON for SERP parses)
   citations TEXT, -- JSON array of cited URLs
-  error TEXT -- null on success
+  error TEXT, -- null on success
+  -- Which concrete provider model answered, e.g. 'gemini-3.5-flash'. `model`
+  -- above stays the surface name so trend lines survive a model swap; this
+  -- column makes the swap visible. Null on rows written before Aug 19 2026.
+  model_id TEXT,
+  -- Google SERP rows only: 'answer' | 'unavailable' | 'shell', written by the
+  -- extraction pass when it parses the stored SERP JSON. Null elsewhere.
+  serp_state TEXT
 );
 
 CREATE INDEX IF NOT EXISTS runs_question_model_ts ON runs (question_id, model, run_ts);

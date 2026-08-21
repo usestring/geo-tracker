@@ -68,6 +68,12 @@ The parser was not the problem. Reading the page that early was. Both Google sur
 
 If you build something like this yourself, that is the failure mode to plan for. A collector that reports zero looks identical to a collector that is working and finding nothing.
 
+## Pin the models you measure
+
+Second failure mode, same shape. Gemini lost 42% of its rows for three days, and nothing in the data said why. The adapter called `gemini-flash-latest`, which is an alias. During a demand spike the alias answered 503 on 5 of 5 probe calls while `gemini-3.5-flash` answered 3 of 3 on the same key in the same minute. An alias also gets re-pointed without notice, so the surface you are measuring can change with no boundary in your data.
+
+The fix has three parts. Pin a concrete model. Keep an ordered fallback list for demand spikes (`GEMINI_MODELS` in `.env`), and verify every fallback actually grounds first: `gemini-3.1-flash-lite` returns HTTP 200 with zero grounding chunks, which would score as "Gemini cited nothing", a false zero instead of a visible outage. And record which model answered in `runs.model_id`, so a swap shows up in the data while the `model` column keeps the surface name and the trend lines intact.
+
 ## Why the Google surfaces need clean egress
 
 Same story, second half. Running the Google surfaces from an office IP got us rate-limited by name on Google's block page. Failures ran at 11 in 50.
@@ -78,11 +84,13 @@ You need a key for this, and you can skip it. The four engine APIs need nothing 
 
 One note if you go this route: `chromium.connectOverCDP()` from Playwright hangs against our endpoint while `puppeteer.connect()` succeeds in 1.2 seconds. That is a bug on our side, filed. The surfaces use puppeteer-core because of it.
 
+And assume the socket opening proves nothing. On one run the endpoint accepted the websocket while the browser behind it was already gone, so the first protocol call hung for puppeteer's default 180-second timeout, and 26 of 50 questions burned three minutes each to learn the same fact. The session layer now makes a real protocol call before handing a session back, runs a 30-second protocol timeout, and stops the pass after three consecutive dead opens. A wedged endpoint should fail in seconds, once.
+
 ## Storage
 
 SQLite, five tables.
 
-`questions` is the bank. `runs` holds one row per question per surface per day, with the raw answer text and the citation list, and failures stored as rows rather than dropped. `mentions` holds the extraction pass output. `domains` is the citation ledger with a classification per domain. `competitor_pages` holds the URL set behind the sitemap diff.
+`questions` is the bank. `runs` holds one row per question per surface per day, with the raw answer text, the citation list, and the concrete model that answered (`model_id`), and failures stored as rows rather than dropped. `mentions` holds the extraction pass output. `domains` is the citation ledger with a classification per domain. `competitor_pages` holds the URL set behind the sitemap diff.
 
 Extraction is two model passes over the stored answers. Haiku decides whether you were mentioned, at what rank, and with what sentiment. Sonnet classifies any newly seen citation domain. Both are idempotent, so re-running costs nothing on rows already done.
 
@@ -90,7 +98,9 @@ Extraction is two model passes over the stored answers. Haiku decides whether yo
 
 Asking every question across every surface daily is more measurement than the signal justifies. Split the bank instead: tag your highest-value questions `tier:daily` and run those Monday through Saturday with `make run-core`, then run the full bank on Sunday with `make run`. Consumer apps and the competitor diff run weekly.
 
-Every runner resumes. A question answered cleanly today is skipped, so a re-run retries failures and nothing else.
+Every runner resumes. A question answered cleanly today is skipped, so a re-run retries failures and nothing else. `--force` asks everything again.
+
+The extraction pass runs on Anthropic's Message Batches API, at half price on input and output. Nothing reads its output until the next morning, and a request that expires or gets canceled falls back to a live call, so cheaper never means thinner. The mentions pass also reads at most the first 8,000 characters of an answer; on our data, 12% of calls were hitting the old 24,000-character cap and carried 46% of all input characters, and zero rows had their only brand mention past 8,000. The measurement calls themselves are deliberately not batched: a 2-request batch of grounded Sonnet was still running after 28 minutes, against 80 seconds live.
 
 ## Two ways to corrupt your own data
 

@@ -216,8 +216,8 @@ const compRows = db.query(`
     ) rn FROM runs r WHERE r.error IS NULL
   )
   SELECT m.competitors, l.d, l.question_id qid FROM mentions m
-  JOIN latest l ON l.id = m.run_id AND l.rn = 1 WHERE m.brand = 'string'
-`).all() as { competitors: string; d: string; qid: number }[];
+  JOIN latest l ON l.id = m.run_id AND l.rn = 1 WHERE m.brand = $brand
+`).all({ $brand: BRAND_NAME.toLowerCase() }) as { competitors: string; d: string; qid: number }[];
 for (const m of compRows) {
   if (!last7.has(m.d) || isBranded(m.qid)) continue;
   try { for (const c of JSON.parse(m.competitors ?? "[]")) compCounts.set(c, (compCounts.get(c) ?? 0) + 1); } catch {}
@@ -323,6 +323,8 @@ function lineChart(): string {
       `<circle cx="${x(i)}" cy="${y(t[key])}" r="4" class="${cls}" data-tip="${t.d} — ${key}: ${fmtPct(t[key])}"/>`
     ).join("");
   const last = data[data.length - 1];
+  // A fresh database has no runs yet; render a placeholder instead of crashing.
+  if (!last) return `<p class="sub">No runs stored yet. Run <code>make run-core</code>, then regenerate.</p>`;
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily non-branded mention and citation rate">
     ${grid}
     <path d="${path("mentioned")}" class="l1"/><path d="${path("cited")}" class="l2"/>

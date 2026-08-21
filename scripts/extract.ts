@@ -12,12 +12,22 @@
 // Uses ANTHROPIC_API_KEY from the same .env as run-daily.ts.
 
 import { Database } from "bun:sqlite";
+import { runBatch, type BatchRequest } from "./anthropic-batch";
 import { join } from "node:path";
 import { parseSerp } from "./serp.ts";
 import { BRAND_NAME, BRAND_DOMAIN, BRAND_MARKERS, isOwnDomain } from "./brand.ts";
 
 const DB_PATH = join(import.meta.dir, "..", "data", "geo.db");
 const BRAND = BRAND_NAME.toLowerCase();
+const NO_BATCH = process.argv.includes("--no-batch");
+
+// How much of an answer the mentions pass reads. Lowered from 24,000 after
+// measuring on our own data: 12% of calls were hitting the old cap and carried
+// 46% of all input characters, and zero rows had their only brand or
+// competitor mention past 8,000 characters. Run that check on your own stored
+// answers before lowering it further.
+const MENTION_MAX_CHARS = 8000;
+
 const SERP_MODELS = new Set(["google-aio", "google-ai-mode"]);
 // Display names the mention pass looks for when it reports "who else was in
 // this answer". Set COMPETITOR_NAMES in .env; without it the pass still runs
@@ -272,6 +282,11 @@ console.log(`${unprocessed.length} runs to extract`);
 let extracted = 0;
 let extractFailures = 0;
 
+// Split the work first: rows that need no model call are settled here, and the
+// rest are collected so they go out as ONE batch instead of N serial calls.
+// Nothing about the prompt changes - only when it is sent.
+const pending: { run: (typeof unprocessed)[number]; prompt: string }[] = [];
+
 for (const run of unprocessed) {
   const isSerp = SERP_MODELS.has(run.model);
 
@@ -284,39 +299,72 @@ for (const run of unprocessed) {
 
   // SERP rows from the fetch path hold a JSON envelope; send the extracted
   // answer, not the HTML. Rows from the Playwright surface (google-ai-mode via
-  // run-apps) already store plain answer text — those must not go through the
+  // run-apps) already store plain answer text - those must not go through the
   // envelope parse, which would misread short answers as shells.
   const isEnvelope = isSerp && run.raw_answer.startsWith('{"statusCode"');
   const answer = isEnvelope
     ? parseSerp(run.raw_answer, run.model).answerText
-    : run.raw_answer.slice(0, 24000);
+    : run.raw_answer.slice(0, MENTION_MAX_CHARS);
   const cheap = answer.toLowerCase();
   const maybeBrand = BRAND_MARKERS.some((m) => cheap.includes(m));
   const maybeCompetitor = COMPETITORS.some((c) => cheap.includes(c.toLowerCase()));
 
-  try {
-    if (!maybeBrand && !maybeCompetitor) {
-      // Nothing to disambiguate - skip the API call, record the negative.
-      insertMention.run(run.id, BRAND, 0, null, null, "[]");
-    } else {
-      const surface = isSerp
-        ? "The text below is the AI-generated answer Google returned for this query."
-        : "The text below is an answer-engine response.";
-      const reply = await anthropic(
-        "claude-haiku-4-5",
-        MENTION_SYSTEM,
-        `${surface}\n\nCited URLs: ${run.citations || "[]"}\n\n---\n${answer}`
-      );
-      const parsed = parseJson(reply);
-      insertMention.run(
-        run.id,
-        BRAND,
-        parsed.mentioned ? 1 : 0,
-        Number.isInteger(parsed.position) ? parsed.position : null,
-        parsed.mentioned ? (parsed.sentiment ?? "neutral") : null,
-        JSON.stringify(Array.isArray(parsed.competitors) ? parsed.competitors : [])
-      );
+  if (!maybeBrand && !maybeCompetitor) {
+    // Nothing to disambiguate - skip the API call, record the negative.
+    insertMention.run(run.id, BRAND, 0, null, null, "[]");
+    extracted++;
+    continue;
+  }
+
+  const surface = isSerp
+    ? "The text below is the AI-generated answer Google returned for this query."
+    : "The text below is an answer-engine response.";
+  pending.push({
+    run,
+    prompt: `${surface}\n\nCited URLs: ${run.citations || "[]"}\n\n---\n${answer}`
+  });
+}
+
+const textOf = (message: any): string =>
+  (message?.content ?? [])
+    .filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("\n");
+
+let mentionAnswers = new Map<string, { message?: any; error?: string }>();
+if (!NO_BATCH && pending.length > 0) {
+  const requests: BatchRequest[] = pending.map(({ run, prompt }) => ({
+    custom_id: `r${run.id}`,
+    params: {
+      model: "claude-haiku-4-5",
+      max_tokens: 1024,
+      system: MENTION_SYSTEM,
+      messages: [{ role: "user", content: prompt }]
     }
+  }));
+  mentionAnswers = await runBatch(requests, { label: "mentions" }).catch((error) => {
+    console.log(`batch mentions: could not start (${error}); falling back to sync`);
+    return new Map<string, { message?: any; error?: string }>();
+  });
+}
+
+for (const { run, prompt } of pending) {
+  try {
+    const outcome = mentionAnswers.get(`r${run.id}`);
+    // Absent from the map means canceled, expired, or batching was off. Ask the
+    // normal way rather than leave a hole in the day.
+    const reply = outcome?.message
+      ? textOf(outcome.message)
+      : await anthropic("claude-haiku-4-5", MENTION_SYSTEM, prompt);
+    const parsed = parseJson(reply);
+    insertMention.run(
+      run.id,
+      BRAND,
+      parsed.mentioned ? 1 : 0,
+      Number.isInteger(parsed.position) ? parsed.position : null,
+      parsed.mentioned ? (parsed.sentiment ?? "neutral") : null,
+      JSON.stringify(Array.isArray(parsed.competitors) ? parsed.competitors : [])
+    );
     extracted++;
   } catch (error) {
     extractFailures++;
@@ -351,10 +399,37 @@ if (newDomains.length > 0) {
   // on long domain names, and the truncated reply threw away the whole batch,
   // including the pairs that had already been emitted before the cut.
   let classified = 0;
+  // Groups of 15 go out together as one Message Batch. The grouping is
+  // unchanged - only the transport is - so a truncated reply still costs at
+  // most the 15 domains in its own group.
+  const groups: string[][] = [];
   for (let i = 0; i < newDomains.length; i += 15) {
-    const batch = newDomains.slice(i, i + 15).map((d) => d.domain);
+    groups.push(newDomains.slice(i, i + 15).map((d) => d.domain));
+  }
+
+  let classifyAnswers = new Map<string, { message?: any; error?: string }>();
+  if (!NO_BATCH && groups.length > 0) {
+    const requests: BatchRequest[] = groups.map((batch, i) => ({
+      custom_id: `g${i}`,
+      params: {
+        model: "claude-sonnet-5",
+        max_tokens: 8000,
+        system: CLASSIFY_SYSTEM,
+        messages: [{ role: "user", content: batch.join("\n") }]
+      }
+    }));
+    classifyAnswers = await runBatch(requests, { label: "classify" }).catch((error) => {
+      console.log(`batch classify: could not start (${error}); falling back to sync`);
+      return new Map<string, { message?: any; error?: string }>();
+    });
+  }
+
+  for (const [i, batch] of groups.entries()) {
     try {
-      const reply = await anthropic("claude-sonnet-5", CLASSIFY_SYSTEM, batch.join("\n"), 8000);
+      const outcome = classifyAnswers.get(`g${i}`);
+      const reply = outcome?.message
+        ? textOf(outcome.message)
+        : await anthropic("claude-sonnet-5", CLASSIFY_SYSTEM, batch.join("\n"), 8000);
       const parsed = parseJsonSalvaging(reply);
       for (const domain of batch) {
         const cls = parsed[domain];
