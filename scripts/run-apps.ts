@@ -405,8 +405,8 @@ for (const surface of selected) {
 
 console.log(`done. failures logged as rows: ${failures}`);
 
-// The scheduled task watches for this marker and posts one line to #bruceinbox.
-// Printing it rather than posting from here keeps Slack credentials out of the
-// runner and keeps all outbound messaging in one place.
+// Whatever schedules this run can watch for this marker and alert however it
+// likes. Printing it rather than posting from here keeps messaging credentials
+// out of the runner and keeps all outbound alerting in one place.
 for (const alert of alerts) console.log(`ALERT: ${alert}`);
 if (alerts.length) process.exit(2);
