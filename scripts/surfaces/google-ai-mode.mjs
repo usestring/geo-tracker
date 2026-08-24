@@ -160,7 +160,13 @@ async function openSession() {
       SKIP_TYPES.has(route.request().resourceType()) ? route.abort() : route.continue()
     )
     const page = await ctx.newPage()
-    return { close: () => browser.close(), page, openedAt: Date.now(), remote: false }
+    return {
+      close: () => browser.close(),
+      page,
+      freshPage: () => ctx.newPage(),
+      openedAt: Date.now(),
+      remote: false
+    }
   }
 
   // Same 180s default protocolTimeout trap that wedged google-aio on Aug 17: a
@@ -193,7 +199,22 @@ async function openSession() {
       if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
       else req.continue().catch(() => {})
     })
-    return { close: () => browser.disconnect(), page, openedAt: Date.now(), remote: true }
+    return {
+      close: () => browser.disconnect(),
+      page,
+      freshPage: async () => {
+        const fresh = await browser.newPage()
+        await fresh.setViewport({ width: 1280, height: 900 })
+        await fresh.setRequestInterception(true)
+        fresh.on('request', (req) => {
+          if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
+          else req.continue().catch(() => {})
+        })
+        return fresh
+      },
+      openedAt: Date.now(),
+      remote: true
+    }
   } catch (e) {
     await Promise.resolve(browser.disconnect()).catch(() => {})
     throw new Error(`hosted browser accepted the socket but did not answer: ${e?.message ?? e}`)
@@ -290,7 +311,28 @@ async function dismissConsent(page) {
  * `session` above.
  */
 async function askOnce(question, timeoutMs) {
-  const { page } = await ensureSession()
+  const s = await ensureSession()
+  // ONE TAB PER QUESTION (Aug 24, 2026).
+  //
+  // AI Mode is a conversation, not a search page. Driving question after
+  // question through the same tab makes Google treat them as one thread, and
+  // once it does the answer still renders but the source list stops rendering
+  // as anchors. The row then looks clean and lands with zero citations.
+  //
+  // Measured on the Aug 24 repair pass, which reused one tab: 37 of 49 clean
+  // rows came back with no citations at all, every one of them after q13. The
+  // historical rate is 0-4%. Re-asking four of the same questions on a fresh
+  // tab returned 20, 17, 38 and 15 citations, and six questions through one
+  // session with a new tab each returned citations 6 times out of 6.
+  //
+  // This is the worst failure shape the tracker has: no error, real answer
+  // text, correct mention data, and silently empty citations. Nothing alerts on
+  // it. A new tab is nearly free next to the alternative, which is reconnecting
+  // for a new websocket and a new exit IP.
+  //
+  // google-aio does NOT need this. It was clean on the same pass, 0 of 12.
+  const page = await s.freshPage()
+  try {
   const url = `https://www.google.com/search?q=${encodeURIComponent(question)}&udm=50&hl=en&gl=us`
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   await dismissConsent(page)
@@ -358,6 +400,9 @@ async function askOnce(question, timeoutMs) {
   })
 
   return { text: answerText.slice(0, 24000), citations }
+  } finally {
+    await page.close().catch(() => {})
+  }
 }
 
 export async function ask(page, question, { timeoutMs = 90_000 } = {}) {

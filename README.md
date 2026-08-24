@@ -124,6 +124,16 @@ Provision the engine keys in a dedicated org, and log the consumer apps in as a 
 
 `make backup` snapshots the database to a GitHub release. Point `BACKUP_REPO` at a **private** repo. Release assets inherit repo visibility, so pointing it at a public repo publishes your database: the full question bank, every raw answer, and your citation ledger. Unset, it does nothing.
 
+## The failure shape to watch for: a clean row with no citations
+
+The blocks and the crashes are the easy failures. They write error rows and you can count them.
+
+The expensive one is quieter. AI Mode is a conversation, not a search page, so asking question after question through the same browser tab makes Google treat them as one thread. The answer text keeps rendering. The source list stops rendering as anchors. The row lands with a real answer, correct mention data, and zero citations, and nothing anywhere reports a problem.
+
+We lost 37 of 49 rows on one pass that way, every one after the thirteenth question, against a historical rate of 0 to 4 percent. Re-asking the same questions on a fresh tab returned 20, 17, 38 and 15 citations. `google-ai-mode` now opens one tab per question, which costs almost nothing next to a reconnect. `google-aio` does not need it and was clean on the same pass.
+
+The general point: when a scraper's output is a count, zero is a value your code will happily store. Check the distribution of that count over time, not just the error rate.
+
 ## Known gaps
 
 `google-ai-mode` counts citations from every link on the page, filtered only for Google's own domains, so its numbers are a slight ceiling rather than a floor. `google-aio` scopes to the AI Overview container and does not share the flaw. Scoping AI Mode the same way is the open follow-up.
