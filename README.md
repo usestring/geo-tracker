@@ -58,6 +58,14 @@ Three consumer apps driven through a logged-in browser profile, weekly, on a 15-
 
 The apps are there because the API is not what a buyer sees. Consumer apps run a different retrieval stack, different system prompts, and personalization on top. Measuring only the API assumes that gap is zero. The dashboard reports it instead.
 
+### Three breakdowns, never one score
+
+Every number here breaks down three ways: by engine, by prompt family, and by cited URL. There is no single visibility score, on purpose.
+
+A blended number hides the cause. Losing on Perplexity while holding on GPT is a different problem from losing evenly across all nine, and the fixes point in opposite directions. A whole category of questions can collapse while the average sits still. A citation total means nothing until you know which URL earned it, because that URL is the page you have to displace or get onto.
+
+The tables follow this everywhere: mention and citation rate per surface, the same rates per question category, and a domain ledger keyed on the cited URL.
+
 ## The bug worth knowing about
 
 For a week our Google AI Overview collector reported a mean of 0.0 citations and scored 48 of 50 questions as "Google showed no AI Overview." Checked by hand in a real browser, 6 of 6 of those questions had one.
