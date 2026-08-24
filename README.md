@@ -92,6 +92,10 @@ You need a key for this, and you can skip it. The four engine APIs need nothing 
 
 One note if you go this route: `chromium.connectOverCDP()` from Playwright hangs against our endpoint while `puppeteer.connect()` succeeds in 1.2 seconds. That is a bug on our side, filed. The surfaces use puppeteer-core because of it.
 
+Expect the egress itself to go stale, and instrument for it. On one run every single question came back a Google traffic challenge, 43 for 43, after weeks at roughly one block in fifty. Nothing in the code had changed. `scripts/probe-google.mjs` sends one request per egress config and prints the exit IP next to what Google served, which separates the two causes that look identical from the outside: a burned IP pool, or a browser fingerprint Google has learned. It measured the premium residential pool at 0 of 7 with a different exit address every time, and the cheaper standard pool at 5 of 6 on the same code. So the pool's reputation was the problem and the fingerprint was fine. Both surfaces now default to the standard tier and the pass recovered the same afternoon.
+
+The general lesson is worth more than the specific tier. A residential pool is shared, so its reputation is not yours alone, and a pool that works today can be flagged tomorrow because of what somebody else did with it. Run the probe before you debug anything else.
+
 And assume the socket opening proves nothing. On one run the endpoint accepted the websocket while the browser behind it was already gone, so the first protocol call hung for puppeteer's default 180-second timeout, and 26 of 50 questions burned three minutes each to learn the same fact. The session layer now makes a real protocol call before handing a session back, runs a 30-second protocol timeout, and stops the pass after three consecutive dead opens. A wedged endpoint should fail in seconds, once.
 
 ## Storage
@@ -125,6 +129,8 @@ Provision the engine keys in a dedicated org, and log the consumer apps in as a 
 `google-ai-mode` counts citations from every link on the page, filtered only for Google's own domains, so its numbers are a slight ceiling rather than a floor. `google-aio` scopes to the AI Overview container and does not share the flaw. Scoping AI Mode the same way is the open follow-up.
 
 Scheduling is not in this repo. We run it from a scheduled task; cron is fine.
+
+Alerting is thin. The surfaces write honest error rows, but nothing shouts when a whole surface comes back empty, so a full day of Google data can go missing quietly. Whatever runs this on a schedule should check for a surface whose clean-row count is zero and say so the same day.
 
 ## License
 

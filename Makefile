@@ -34,6 +34,16 @@ serp:
 	bun scripts/run-apps.ts --only=google-ai-mode
 	bun scripts/run-apps.ts --only=google-aio
 
+# --- tests ------------------------------------------------------------------
+# Fakes the hosted browser, so no network and no browser credits are spent.
+# These exist because of one incident: a Google page lost its main frame
+# mid-pass and the next 126 questions all failed on the same dead frame id.
+# The surfaces tracked how OLD a session was and never whether it still
+# worked, and reconnecting did not help because the endpoint hands the same
+# target back. Both tests reproduce that exact condition.
+test:
+	bun test tests/
+
 # --- consumer apps (weekly, tier-1 questions only) --------------------------
 # The API is not what a buyer sees. Consumer apps run a different retrieval
 # stack, different system prompts, and personalization on top.
@@ -105,4 +115,4 @@ backup:
 
 .PHONY: seed dry-run run run-core retry serp serp-core apps apps-dry apps-check \
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
-        content-coverage competitors gsc-auth gsc backup
+        content-coverage competitors gsc-auth gsc backup test

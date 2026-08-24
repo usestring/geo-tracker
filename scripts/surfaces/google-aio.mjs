@@ -51,14 +51,16 @@
 //
 // GOOGLE_AIO_LOCAL=1 forces a local browser. Offline debugging only — from this
 // machine Google blocks the home IP outright.
-import { createSessionPool, dismissConsent, sleep, blockedError } from './cdp-session.mjs'
+import { createSessionPool, dismissConsent, sleep, blockedError, DEAD_PAGE_RE } from './cdp-session.mjs'
 
 const USE_LOCAL = process.env.GOOGLE_AIO_LOCAL === '1' || !process.env.STRING_API_KEY
 
 const pool = createSessionPool({
   local: USE_LOCAL,
   sessionMs: Number(process.env.GOOGLE_AIO_SESSION_MS ?? 20 * 60 * 1000),
-  proxy: process.env.GOOGLE_AIO_PROXY ?? 'premium',
+  // 'standard', not 'premium': Google challenges 100% of premium exits as of
+  // Aug 24 2026. Full measurement in the PROXY TIER note in google-ai-mode.mjs.
+  proxy: process.env.GOOGLE_AIO_PROXY ?? 'standard',
   country: process.env.GOOGLE_AIO_COUNTRY ?? 'US',
 })
 
@@ -220,7 +222,7 @@ export async function launch() {
  * transport, not the question, and reconnecting costs one page load. Without
  * this, a mid-pass drop writes an error row for every question that follows.
  */
-const RECOVERABLE = /detached frame|target closed|session closed|websocket|protocol error|connection closed/i
+const RECOVERABLE = DEAD_PAGE_RE
 
 export async function ask(page, question, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   try {

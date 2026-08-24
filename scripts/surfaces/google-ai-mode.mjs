@@ -58,18 +58,50 @@
 // only — from this machine Google now blocks it outright.
 import puppeteer from 'puppeteer-core'
 import { chromium } from 'playwright'
+import { pageIsAlive, sleep, DEAD_PAGE_RE } from './cdp-session.mjs'
 
 const USE_LOCAL = process.env.AI_MODE_LOCAL === '1' || !process.env.STRING_API_KEY
 const SESSION_MAX_MS = Number(process.env.AI_MODE_SESSION_MS ?? 20 * 60 * 1000)
-const PROXY_TIER = process.env.AI_MODE_PROXY ?? 'premium'
+// ---------------------------------------------------------------------------
+// PROXY TIER (Aug 24, 2026) — why this is 'standard' and not 'premium'
+//
+// On Aug 24 the SERP pass failed 43 of 43 questions, every one a Google traffic
+// challenge. Not a crash and not the detached-frame bug: Google simply refused
+// every request. The Aug 11 hosted-browser move had held at 1 block in 50, so
+// something changed underneath us rather than in this code.
+//
+// Measured the same afternoon, one AI Mode request per session, fresh exit IP
+// each time (probe kept at scripts/probe-google.mjs):
+//
+//   premium  / US   0 of 7 answered   76.86.251.150, 65.30.162.75, 173.189.209.102,
+//                                     24.16.248.156, 108.214.128.241, 98.50.109.94 ...
+//   standard / US   5 of 6 answered   134.199.87.96, 193.46.204.143, 91.92.23.177 ...
+//   premium  / DE   0 of 1 answered
+//   GB       / premium  answered, but behind the EU consent wall
+//
+// Seven different premium exit IPs, seven challenges. So this is not one burned
+// address, it is the whole premium residential pool: Google has flagged the
+// range. The standard pool is a different set of addresses and still answers.
+// The browser fingerprint is not the problem — the same puppeteer build, the
+// same headers and the same page code pass on standard and fail on premium.
+//
+// Standard also bills at $5/GB instead of $10/GB, so this is cheaper, not a
+// trade. Set AI_MODE_PROXY=premium to go back if the pool's reputation recovers.
+//
+// One block still earns one reconnect (see ask() below). At an 83% per-request
+// pass rate that retry puts the surface near 97%, so forcing a fresh session on
+// every question would add connect latency and spend for very little.
+//
+// FOR ENG, not just for the tracker: a customer pointing the premium tier at
+// Google gets a challenge page 100% of the time. That is a product defect.
+// ---------------------------------------------------------------------------
+const PROXY_TIER = process.env.AI_MODE_PROXY ?? 'standard'
 const COUNTRY = process.env.AI_MODE_COUNTRY ?? 'US'
 
 // Module-level session. `ask()` reads the live page from here rather than the
 // one the runner hands it, because a reconnect replaces the page and the runner
 // holds whatever it was given at launch.
 let session = null
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function cdpUrl() {
   const p = new URLSearchParams({ proxy: PROXY_TIER, countryCode: COUNTRY })
@@ -78,6 +110,39 @@ function cdpUrl() {
 
 /** Drop bytes we never read. Bandwidth is what the hosted browser bills. */
 const SKIP_TYPES = new Set(['image', 'font', 'media'])
+
+// After this many opens in a row fail, the endpoint is down rather than flaky.
+// Keep going and every remaining question pays the reconnect for the same answer.
+const MAX_CONSECUTIVE_OPEN_FAILURES = 3
+let consecutiveOpenFailures = 0
+
+// ---------------------------------------------------------------------------
+// DEAD PAGES (Aug 24, 2026) — why liveness is checked instead of assumed
+//
+// A Puppeteer page whose main frame has been destroyed still looks like a page.
+// It answers as an object, `isClosed()` stays false, and every call into it
+// throws `Attempted to use detached Frame '<id>'`. Nothing in the session
+// bookkeeping noticed, because `ensureSession` only ever asked how OLD the
+// session was.
+//
+// Measured on the Aug 21 full-bank pass: q61 answered at 17:13:51, one frame
+// detached, and q62 through q200 then failed 126 times in a row on the SAME
+// frame id over the next ten minutes. Two things kept it dead:
+//
+//   1. `ensureSession` returned the cached session on age alone, so a page with
+//      no frame was handed to every following question.
+//   2. The 20-minute recycle did not rescue it. The hosted endpoint gives the
+//      same target back on reconnect, so disconnect-then-connect returned the
+//      identical dead page — which is why one frame id spans the whole window,
+//      including past the 17:18 recycle that was supposed to fix it.
+//
+// So the page is probed before use, and a reconnect that gets the same dead
+// target opens a fresh one instead of trusting `pages()[0]`. The probe
+// (pageIsAlive) and the dead-transport classifier (DEAD_PAGE_RE) live in
+// cdp-session.mjs so both Google surfaces stay on one definition of "dead".
+// ---------------------------------------------------------------------------
+
+const isDeadPage = (e) => DEAD_PAGE_RE.test(String(e?.message ?? e))
 
 async function openSession() {
   if (USE_LOCAL) {
@@ -107,14 +172,32 @@ async function openSession() {
     headers: { Authorization: `Bearer ${process.env.STRING_API_KEY}` },
     protocolTimeout: 30_000
   })
-  const page = (await browser.pages())[0] ?? (await browser.newPage())
-  await page.setViewport({ width: 1280, height: 900 })
-  await page.setRequestInterception(true)
-  page.on('request', (req) => {
-    if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
-    else req.continue().catch(() => {})
-  })
-  return { close: () => browser.disconnect(), page, openedAt: Date.now(), remote: true }
+  // Reconnecting does NOT hand back a clean page — see the DEAD PAGES note
+  // above. Probe the reused target and open a new one when its frame is gone,
+  // otherwise a wedged page survives every recycle meant to replace it. Every
+  // step through interception setup stays inside this guard: a throw after
+  // connect would otherwise leak a live billed websocket until the server's
+  // 30-minute kill. A fresh newPage() only needs the probe when it replaces a
+  // dead target - its own creation just proved the browser answers.
+  try {
+    let page = (await browser.pages())[0] ?? null
+    if (page && !(await pageIsAlive(page))) {
+      await page.close().catch(() => {})
+      page = await browser.newPage()
+      if (!(await pageIsAlive(page))) throw new Error('page has no live frame')
+    }
+    if (!page) page = await browser.newPage()
+    await page.setViewport({ width: 1280, height: 900 })
+    await page.setRequestInterception(true)
+    page.on('request', (req) => {
+      if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
+      else req.continue().catch(() => {})
+    })
+    return { close: () => browser.disconnect(), page, openedAt: Date.now(), remote: true }
+  } catch (e) {
+    await Promise.resolve(browser.disconnect()).catch(() => {})
+    throw new Error(`hosted browser accepted the socket but did not answer: ${e?.message ?? e}`)
+  }
 }
 
 async function closeSession() {
@@ -123,14 +206,44 @@ async function closeSession() {
   if (s) await Promise.resolve(s.close()).catch(() => {})
 }
 
-/** Open a session, or replace one that is stale or has just been blocked. */
+/** Open a session, or replace one that is stale, dead, or has just been blocked. */
 async function ensureSession({ force = false } = {}) {
-  if (session && !force && Date.now() - session.openedAt < SESSION_MAX_MS) return session
+  const stale = !session || Date.now() - session.openedAt >= SESSION_MAX_MS
+  // Age is not health. A session inside its 20 minutes can still be holding a
+  // page whose frame died, which is exactly what burned 126 questions on Aug 21.
+  if (session && !force && !stale && (await pageIsAlive(session.page))) return session
   if (session) {
-    console.log(force ? '  reconnecting for a fresh exit IP' : '  session near its 30-min cap, reconnecting')
+    console.log(
+      force
+        ? '  reconnecting for a fresh exit IP'
+        : stale
+          ? '  session past its recycle age, reconnecting'
+          : '  page lost its frame, reconnecting'
+    )
   }
   await closeSession()
-  session = await openSession()
+
+  // Back off between reconnects. A hosted browser that just dropped us is often
+  // still tearing the old session down, and reconnecting into that window is how
+  // the wedged state gets reached in the first place.
+  if (consecutiveOpenFailures > 0) {
+    await sleep(Math.min(2000 * 2 ** (consecutiveOpenFailures - 1), 15_000))
+  }
+
+  try {
+    session = await openSession()
+    consecutiveOpenFailures = 0
+  } catch (e) {
+    consecutiveOpenFailures += 1
+    if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
+      const err = new Error(
+        `hosted browser unreachable after ${consecutiveOpenFailures} attempts: ${e?.message ?? e}`
+      )
+      err.code = 'SESSION_POOL_DEAD'
+      throw err
+    }
+    throw e
+  }
   return session
 }
 
@@ -251,13 +364,19 @@ export async function ask(page, question, { timeoutMs = 90_000 } = {}) {
   try {
     return await askOnce(question, timeoutMs)
   } catch (e) {
-    if (e.code !== 'BLOCKED' || USE_LOCAL) throw e
+    const dead = isDeadPage(e)
+    if ((e.code !== 'BLOCKED' && !dead) || USE_LOCAL) throw e
     // A challenge is tied to the exit IP far more often than to the query, so a
     // fresh session is a real second chance rather than a repeat of the same
     // request. Exactly one retry: three of the Aug 11 failures were content
     // triggered (queries about defeating CAPTCHA and Cloudflare) and those fail
     // from any address. Retrying them harder only spends bandwidth.
-    console.log(`  blocked, retrying on a fresh session: ${question.slice(0, 60)}`)
+    //
+    // A detached frame is not a second chance, it is the only chance: the page
+    // never heals, so without this the rest of the pass fails on the same id.
+    console.log(
+      `  ${dead ? 'page died' : 'blocked'}, retrying on a fresh session: ${question.slice(0, 60)}`
+    )
     await ensureSession({ force: true })
     return await askOnce(question, timeoutMs)
   }

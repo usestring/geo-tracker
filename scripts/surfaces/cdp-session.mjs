@@ -48,6 +48,30 @@ const MAX_CONSECUTIVE_OPEN_FAILURES = 3
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * Is this page still usable?
+ *
+ * A page whose main frame has been destroyed still looks like a page: it answers
+ * as an object, `isClosed()` stays false, and every call into it throws
+ * `Attempted to use detached Frame '<id>'`. `evaluate` is the cheapest call that
+ * actually crosses into the frame, so it is the only probe that catches one.
+ *
+ * google-ai-mode lost 126 questions to this on Aug 21 because it checked how OLD
+ * a session was and never whether it still worked. This module has always had
+ * the retry half (see google-aio's RECOVERABLE), but a reconnect is not a clean
+ * slate on its own: the hosted endpoint hands the SAME target back, so a dead
+ * page can survive the very recycle meant to replace it.
+ */
+export async function pageIsAlive(page) {
+  if (!page || page.isClosed?.()) return false
+  try {
+    await page.evaluate(() => 1)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * A recycling browser session.
  *
  * @param {object} opts
@@ -97,21 +121,33 @@ export function createSessionPool({
 
     // The websocket connecting proves nothing: the endpoint accepts it even when
     // the remote browser is gone. The first protocol call is where that shows up,
-    // so make it here and refuse to hand back a dead session.
+    // so make it here and refuse to hand back a dead session. Every step through
+    // interception setup stays inside this guard: a throw after connect would
+    // otherwise leak a live billed websocket until the server's 30-minute kill.
     let page
     try {
-      page = (await browser.pages())[0] ?? (await browser.newPage())
+      // Probe the reused target before adopting it. `pages()[0]` is often the
+      // same page a previous session wedged, and taking it back on faith is how
+      // a detached frame outlives its own recycle. A fresh newPage() only needs
+      // the probe when it replaces a dead target - its own creation just proved
+      // the browser answers.
+      page = (await browser.pages())[0] ?? null
+      if (page && !(await pageIsAlive(page))) {
+        await page.close().catch(() => {})
+        page = await browser.newPage()
+        if (!(await pageIsAlive(page))) throw new Error('page has no live frame')
+      }
+      if (!page) page = await browser.newPage()
       await page.setViewport({ width: 1280, height: 900 })
+      await page.setRequestInterception(true)
+      page.on('request', (req) => {
+        if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
+        else req.continue().catch(() => {})
+      })
     } catch (e) {
       await Promise.resolve(browser.disconnect()).catch(() => {})
       throw new Error(`hosted browser accepted the socket but did not answer: ${e?.message ?? e}`)
     }
-
-    await page.setRequestInterception(true)
-    page.on('request', (req) => {
-      if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
-      else req.continue().catch(() => {})
-    })
     return { close: () => browser.disconnect(), page, openedAt: Date.now(), remote: true }
   }
 
@@ -123,10 +159,17 @@ export function createSessionPool({
 
   /** Open a session, or replace one that is stale or has just been blocked. */
   async function ensure({ force = false } = {}) {
-    if (session && !force && Date.now() - session.openedAt < sessionMs) return session
+    const stale = !session || Date.now() - session.openedAt >= sessionMs
+    // Age is not health: a session well inside its 20 minutes can still be
+    // holding a page whose frame died. Probe before handing it back.
+    if (session && !force && !stale && (await pageIsAlive(session.page))) return session
     if (session) {
       console.log(
-        force ? '  reconnecting for a fresh exit IP' : '  session near its 30-min cap, reconnecting'
+        force
+          ? '  reconnecting for a fresh exit IP'
+          : stale
+            ? '  session past its recycle age, reconnecting'
+            : '  page lost its frame, reconnecting'
       )
     }
     await close()
@@ -195,3 +238,11 @@ export function blockedError(message) {
   err.code = 'BLOCKED'
   return err
 }
+
+// Errors that mean the page or transport is gone, not that the question failed.
+// Puppeteer words it differently depending on whether the frame, the target, the
+// execution context or the whole connection went first, so match the family
+// rather than one string. One definition on purpose: surfaces with private
+// copies each end up blind to a failure class only the other knows about.
+export const DEAD_PAGE_RE =
+  /detached frame|target closed|session closed|websocket|protocol error|connection closed|execution context was destroyed|requesting main frame too early/i
