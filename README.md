@@ -11,7 +11,7 @@ We built this at [String](https://usestring.ai) to answer that question about ou
 Needs [bun](https://bun.sh) and at least one engine API key.
 
 ```sh
-git clone https://github.com/durable-alpha/geo-tracker && cd geo-tracker
+git clone https://github.com/usestring/geo-tracker && cd geo-tracker
 bun install
 cp .env.example .env        # set BRAND_NAME, BRAND_DOMAIN, and one API key
 ```
@@ -97,6 +97,12 @@ Expect the egress itself to go stale, and instrument for it. On one run every si
 The general lesson is worth more than the specific tier. A residential pool is shared, so its reputation is not yours alone, and a pool that works today can be flagged tomorrow because of what somebody else did with it. Run the probe before you debug anything else.
 
 And assume the socket opening proves nothing. On one run the endpoint accepted the websocket while the browser behind it was already gone, so the first protocol call hung for puppeteer's default 180-second timeout, and 26 of 50 questions burned three minutes each to learn the same fact. The session layer now makes a real protocol call before handing a session back, runs a 30-second protocol timeout, and stops the pass after three consecutive dead opens. A wedged endpoint should fail in seconds, once.
+
+Run them with `make serp-core` for the daily subset or `make serp` for the full bank. Both resume, so a re-run only retries what failed. `bun scripts/probe-google.mjs` is the first thing to reach for when they start coming back blocked.
+
+## Tests
+
+`make test` runs in about thirty seconds and spends no network and no browser credits. It fakes the hosted browser and reproduces the dead-page condition described above, which is the failure that cost us 126 questions in one pass.
 
 ## Storage
 

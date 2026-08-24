@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "aeo-tracker",
+      "name": "geo-tracker",
       "dependencies": {
         "playwright": "^1.62.1",
         "puppeteer-core": "^25.6.0",
