@@ -1,16 +1,16 @@
 id,text,intent,persona,brand,tags,active
-1,What's the best web scraping API in 2026?,shortlist,none,,theme:category;cat:comparison;tier:daily,1
-2,Best web scraping tools for AI agents?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily,1
-3,Best MCP server for web access / web scraping?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily,1
-4,Best Firecrawl alternatives?,shortlist,none,,theme:category;cat:comparison;tier:daily,1
-5,Best API to scrape sites protected by Cloudflare?,shortlist,none,,theme:blocking;cat:feature;tier:daily,1
-6,How do I bypass Cloudflare when scraping?,howto,none,,theme:blocking;cat:feature;tier:daily,1
-7,Best tool to convert websites to markdown for LLMs / RAG?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily,1
-8,Cheapest way to scrape at scale / scraping API pricing comparison,comparison,none,,theme:scale-pricing;cat:comparison;tier:daily,1
-9,Which web scraping APIs don't use credit-based pricing?,comparison,none,,theme:scale-pricing;cat:comparison,1
-10,Is web scraping legal?,comparison,none,,theme:compliance;cat:use-case,1
-11,Is it legal to scrape publicly available data in the US?,comparison,none,,theme:compliance;cat:use-case,1
-12,Best scraping API for e-commerce price data?,shortlist,none,,theme:data-jobs;cat:use-case;tier:daily,1
-13,How to scrape Amazon product data?,howto,none,,theme:data-jobs;cat:use-case;tier:daily,1
-14,How do I scrape a site that requires login?,howto,none,,theme:blocking;cat:feature,1
-15,What is String (usestring.ai)?,comparison,none,,theme:brand;cat:company;tier:daily,1
+1,What's the best web scraping API in 2026?,shortlist,none,,theme:category;cat:comparison;tier:daily;prio:1,1
+2,Best web scraping tools for AI agents?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily;prio:2,1
+3,Best MCP server for web access / web scraping?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily;prio:2;type:accuracy,1
+4,Best Firecrawl alternatives?,shortlist,none,,theme:category;cat:comparison;tier:daily;prio:1,1
+5,Best API to scrape sites protected by Cloudflare?,shortlist,none,,theme:blocking;cat:feature;tier:daily;prio:1;type:accuracy,1
+6,How do I bypass Cloudflare when scraping?,howto,none,,theme:blocking;cat:feature;tier:daily;prio:1;type:accuracy,1
+7,Best tool to convert websites to markdown for LLMs / RAG?,shortlist,none,,theme:ai-data;cat:use-case;tier:daily;prio:2;type:accuracy,1
+8,Cheapest way to scrape at scale / scraping API pricing comparison,comparison,none,,theme:scale-pricing;cat:comparison;tier:daily;prio:2,1
+9,Which web scraping APIs don't use credit-based pricing?,comparison,none,,theme:scale-pricing;cat:comparison;prio:2;type:accuracy,1
+10,Is web scraping legal?,comparison,none,,theme:compliance;cat:use-case;prio:3,1
+11,Is it legal to scrape publicly available data in the US?,comparison,none,,theme:compliance;cat:use-case;prio:3,1
+12,Best scraping API for e-commerce price data?,shortlist,none,,theme:data-jobs;cat:use-case;tier:daily;prio:2,1
+13,How to scrape Amazon product data?,howto,none,,theme:data-jobs;cat:use-case;tier:daily;prio:2,1
+14,How do I scrape a site that requires login?,howto,none,,theme:blocking;cat:feature;prio:1,1
+15,What is String (usestring.ai)?,comparison,none,,theme:brand;cat:company;tier:daily;prio:3;type:accuracy,1

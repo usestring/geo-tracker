@@ -42,7 +42,7 @@ We run this every two weeks over a 14 day window, seeded with keyword groups rat
 
 Tag from the start. "Are we cited more this month" is a much weaker question than "are we cited more on pricing questions this month," and you cannot retrofit the second one.
 
-Three axes, all in the `tags` column, semicolon separated:
+Five axes, all in the `tags` column, semicolon separated:
 
 `intent` is its own column: `shortlist` (buyer choosing from a list), `howto` (buyer solving a problem), `comparison` (buyer evaluating claims).
 
@@ -51,6 +51,10 @@ Three axes, all in the `tags` column, semicolon separated:
 `cat:` groups by page type that would answer it: `comparison`, `feature`, `use-case`, `company`. This is the bridge from measurement to what to write.
 
 `tier:daily` marks the questions worth asking every day. Everything else runs on the weekly full pass. This is the cost control, and it should be your highest-value questions, not a random sample.
+
+`prio:1|2|3` weights a question by how central its subject is to the buyer's consideration decision. `prio:1` is the core of why anyone buys in your category, `prio:2` is supporting, `prio:3` is peripheral (brand curiosity, legal questions). `make rank` breaks share of voice out per level, so a slide on `prio:1` questions never hides behind a gain on `prio:3` ones.
+
+`type:` classifies what a question diagnoses. Untyped questions are **discovery** questions — the default, "does the engine bring us up unprompted". The typed ones: `type:validation` asks the engine directly about a fact you want it to know ("Does X support Y?"); `type:sentiment` asks how you are perceived ("X reviews — is it legit?"); `type:market-perception` probes how the category itself is described; `type:competitor` asks about a rival by name; `type:accuracy` marks questions where a factual claim of yours should surface, so wrong answers can be caught. `make routing` needs at least one `type:validation` question per theme to compute that theme's validation score; until then it reports "no validation coverage" rather than guessing.
 
 ## Rules that keep the data honest
 
