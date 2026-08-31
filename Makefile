@@ -122,6 +122,13 @@ weekly-measure:
 	-$(MAKE) sentiment
 	-$(MAKE) robots-audit
 
+# Daily one-page report (HTML): run health per surface, today's non-branded
+# mention rate vs the 7d average, new citation domains, and any surface that
+# produced zero clean rows. Print data/daily-report.html to PDF with your own
+# browser if you want a file to circulate.
+daily-report:
+	bun scripts/daily-report.ts
+
 # Which of your tracked questions does your own site actually answer? Reads
 # the live agent-facing corpus (/llms.txt + .md renditions), so it grades what
 # shipped rather than what you meant to ship.
@@ -174,5 +181,5 @@ backup:
 .PHONY: seed dry-run run run-core retry serp serp-core apps apps-dry apps-check \
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
         content-coverage competitors gsc-auth gsc backup test \
-        rank routing objections sentiment robots-audit weekly-measure \
+        rank routing objections sentiment robots-audit weekly-measure daily-report \
         opportunity edit-enroll edit-read edit-report

@@ -11,9 +11,8 @@
 // is not. Retries append rows, so every count reads the latest row per
 // question x model x day.
 //
-// Breakouts: per theme:* always; per prio: level only once the prio tags land
-// in questions.csv (a parallel pass) - absent tags mean the breakout is
-// skipped, never guessed.
+// Breakouts: per theme:* always; per prio: level only where prio tags exist
+// in questions.csv - absent tags mean the breakout is skipped, never guessed.
 //
 // Writes data/visibility-rank.json; prints a compact ladder.
 
@@ -127,8 +126,8 @@ const byTheme = themes
   .map((theme) => ({ theme, ...scope(rows.filter((r) => themeOf(r.tags) === theme)) }))
   .filter((t) => t.rows + t.prevRows > 0);
 
-// Prio breakout only when the tags exist at all - the tagging pass runs in
-// parallel with this script landing, so absence is expected, not an error.
+// Prio breakout only when the tags exist at all - an untagged bank is
+// expected, not an error.
 const prios = [...new Set(rows.map((r) => prioOf(r.tags)).filter((p): p is number => p !== null))].sort();
 const byPrio = prios.map((prio) => ({ prio, ...scope(rows.filter((r) => prioOf(r.tags) === prio)) }));
 

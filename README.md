@@ -66,6 +66,24 @@ A blended number hides the cause. Losing on Perplexity while holding on GPT is a
 
 The tables follow this everywhere: mention and citation rate per surface, the same rates per question category, and a domain ledger keyed on the cited URL.
 
+### The measurement pack
+
+Seven more measurements sit on top of the same data, each behind its own make target and each writing a JSON side-output the dashboard picks up.
+
+`make rank` computes share of voice for you and every competitor in `COMPETITOR_NAMES`, ranks the ladder, and breaks it out per theme and per `prio:` level, trailing 7 days against the 7 before. A brand that appears nowhere is unranked, not last.
+
+`make routing` decides, per theme, whether the work is on-page or off-page. It compares the mention rate when a fact is asked about directly (`type:validation` questions) against the mention rate on the theme's ordinary discovery questions. Engines that know the fact but never surface it are a trust gap, fixed off-page; engines that never learned it are a comprehension gap, fixed on-page. A theme without validation questions gets "no validation coverage", not a guess.
+
+`make objections` clusters the window's negative and inaccurate answers into named objection themes, each with a verbatim quote and a one-line reframe. Zero negative rows writes an empty list; it never invents objections. One Sonnet call, needs `ANTHROPIC_API_KEY`.
+
+`make sentiment` counts positive/neutral/negative/inaccurate per theme over the branded and `type:sentiment` questions, week over week.
+
+`make robots-audit` parses robots.txt properly (RFC 9309 group selection, longest-match path rules) and evaluates 15 AI crawlers against the hosts in `ROBOTS_AUDIT_HOSTS`. A blocked answer-retrieval or search-index crawler is a fault; a blocked training crawler is a policy note. It diffs against the previous audit, so a deploy that flips a rule shows up the next run.
+
+`make weekly-measure` runs all five, each step allowed to fail alone.
+
+Two more read the GSC pulls instead of the answer data. `make opportunity` ranks pages by the clicks a fix would earn - a recover / CTR / rank lever per page, plus near-miss queries - as an ordering, not a forecast. `make edit-enroll URL=... NOTE=...` snapshots a page the day an edit ships; `make edit-read` takes the +28d and +56d readings when due, reporting the control-adjusted lift against the rest of the site, so a rising tide reads as zero. And `make daily-report` renders a one-page daily HTML report: run health per surface, today's mention rate against the 7-day average, and a banner for any surface that produced zero clean rows.
+
 ## The bug worth knowing about
 
 For a week our Google AI Overview collector reported a mean of 0.0 citations and scored 48 of 50 questions as "Google showed no AI Overview." Checked by hand in a real browser, 6 of 6 of those questions had one.
