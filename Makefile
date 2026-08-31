@@ -84,6 +84,44 @@ extract:
 dashboard:
 	bun scripts/dashboard.ts
 
+# --- measurement pack (rank / routing / objections / sentiment / robots) ----
+# Share-of-voice rank vs every competitor, overall / per theme / per prio,
+# trailing 7 days against the 7 before. Reads extracted mentions only.
+rank:
+	bun scripts/visibility-rank.ts
+
+# Validation-x-discovery routing per theme: does the theme need on-page or
+# off-page work? Emits "no validation coverage" until type:validation
+# questions exist for a theme.
+routing:
+	bun scripts/routing.ts
+
+# Cluster the window's negative/inaccurate answers into named objection
+# themes with a verbatim quote and a reframe each. One Sonnet call; needs
+# ANTHROPIC_API_KEY. Zero negative rows writes an empty list.
+objections:
+	bun scripts/objections.ts
+
+# Sentiment counts + net-positive share per theme over branded and
+# type:sentiment questions, week over week.
+sentiment:
+	bun scripts/sentiment-by-attribute.ts
+
+# Are the AI crawlers allowed into your site? Blocked answer-retrieval or
+# search-index crawler = FAULT; blocked training crawler = policy note.
+# Diffs against the previous audit and prints CHANGED lines.
+robots-audit:
+	bun scripts/robots-audit.ts
+
+# The whole measurement pack in sequence. Each step may fail without killing
+# the chain - a missing API key must not cost the robots audit.
+weekly-measure:
+	-$(MAKE) rank
+	-$(MAKE) routing
+	-$(MAKE) objections
+	-$(MAKE) sentiment
+	-$(MAKE) robots-audit
+
 # Which of your tracked questions does your own site actually answer? Reads
 # the live agent-facing corpus (/llms.txt + .md renditions), so it grades what
 # shipped rather than what you meant to ship.
@@ -136,4 +174,5 @@ backup:
 .PHONY: seed dry-run run run-core retry serp serp-core apps apps-dry apps-check \
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
         content-coverage competitors gsc-auth gsc backup test \
+        rank routing objections sentiment robots-audit weekly-measure \
         opportunity edit-enroll edit-read edit-report
