@@ -562,6 +562,118 @@ const engageList = engageUrls.length === 0 ? `<p class="empty">No community URLs
   `<ol>${engageUrls.map((u) => `<li><a href="${esc(u.url)}" target="_blank" rel="noopener">${esc(u.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 90))}</a>
    <span class="sub">×${u.count} · ${u.domain}</span></li>`).join("")}</ol>`;
 
+
+// ---- Measurement-pack cards (rank / routing / objections / sentiment / robots) ----
+// Each reads its own JSON side-output and degrades to "not yet computed" when
+// the file is missing - the pack runs on its own cadence (make weekly-measure).
+
+const readJson = (name: string): any | null => {
+  const p = join(import.meta.dir, "..", "data", name);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
+};
+const notComputed = (target: string) =>
+  `<p class="empty">Not yet computed. Run <code>make ${target}</code>, then regenerate.</p>`;
+
+const rankData = readJson("visibility-rank.json");
+const rankCard = !rankData
+  ? notComputed("rank")
+  : (() => {
+      const s = rankData.overall.brand;
+      const move = (m: number | null) =>
+        m === null ? `<span class="sub">new</span>` :
+        m === 0 ? `<span class="sub">•</span>` :
+        m > 0 ? `<span class="up">▲ +${m}</span>` : `<span class="down">▼ ${m}</span>`;
+      const ladder = rankData.overall.top.map((b: any) => `<tr>
+        <td class="num">${b.rank}</td><td>${esc(b.brand)}${b.brand === BRAND_NAME ? " <strong>← us</strong>" : ""}</td>
+        <td class="num">${b.share.toFixed(1)}%</td><td class="num sub">${b.prevShare.toFixed(1)}%</td></tr>`).join("");
+      const themeRows = (rankData.byTheme ?? []).map((t: any) => `<tr>
+        <td>${esc(t.theme)}</td><td class="num">${t.brand.rank ?? "—"}</td>
+        <td class="num">${t.brand.share.toFixed(1)}%</td><td>${move(t.brand.move)}</td>
+        <td class="num sub">${t.rows}</td></tr>`).join("");
+      const prioRows = (rankData.byPrio ?? []).map((p: any) => `<tr>
+        <td>prio:${p.prio}</td><td class="num">${p.brand.rank ?? "—"}</td>
+        <td class="num">${p.brand.share.toFixed(1)}%</td><td>${move(p.brand.move)}</td>
+        <td class="num sub">${p.rows}</td></tr>`).join("");
+      return `<p class="sub" style="margin:0 0 10px">${esc(BRAND_NAME)} is <strong>#${s.rank ?? "unranked"}</strong> at ${s.share}% share of voice
+        (prev #${s.prevRank ?? "—"} at ${s.prevShare}%, ${move(s.move)}) over ${rankData.overall.rows} non-branded answers, trailing 7 days vs the 7 before.</p>
+      <div class="row">
+        <div><h3>Top brands — share of answers</h3>
+        <table><thead><tr><th class="num">#</th><th>Brand</th><th class="num">Share</th><th class="num">Prev</th></tr></thead><tbody>${ladder}</tbody></table></div>
+        <div><h3>${esc(BRAND_NAME)} per theme${prioRows ? " and prio" : ""}</h3>
+        <table><thead><tr><th>Slice</th><th class="num">Rank</th><th class="num">Share</th><th>WoW</th><th class="num">n</th></tr></thead>
+        <tbody>${themeRows}${prioRows}</tbody></table></div>
+      </div>`;
+    })();
+
+const routingData = readJson("routing.json");
+const routingCard = !routingData
+  ? notComputed("routing")
+  : `<table><thead><tr><th>Theme</th><th class="num">Validation</th><th class="num">Discovery</th><th>Verdict</th></tr></thead>
+    <tbody>${(routingData.themes ?? []).map((t: any) => {
+      const chip = t.verdict === "goal-state" ? "publisher" :
+        t.verdict.startsWith("trust-gap") ? "affiliate" :
+        t.verdict.startsWith("comprehension-gap") ? "competitor" : "new";
+      return `<tr><td>${esc(t.theme)}</td>
+        <td class="num">${t.validation ? `${t.validation.pct}% <span class="sub">(${t.validation.n})</span>` : "—"}</td>
+        <td class="num">${t.discovery.pct}% <span class="sub">(${t.discovery.n})</span></td>
+        <td><span class="chip ${chip}">${esc(t.verdict)}</span></td></tr>`;
+    }).join("")}</tbody></table>
+    <p class="sub" style="margin-top:8px">Validation = mention rate when a theme's fact is asked about directly (type:validation questions);
+    discovery = mention rate on the theme's ordinary non-branded questions. Discovery ≥ ${routingData.thresholds?.discoveryGoalPct ?? 10}% is the goal state;
+    below it, validation ≥ ${routingData.thresholds?.validationTrustPct ?? 60}% routes the work off-page, lower routes it on-page.</p>`;
+
+const objectionsData = readJson("objections.json");
+const objectionsCard = !objectionsData
+  ? notComputed("objections")
+  : (objectionsData.objections ?? []).length === 0
+    ? `<p class="empty">No recurring objections: ${objectionsData.negativeRows} negative/inaccurate answers in the last ${objectionsData.windowDays} days.</p>`
+    : `<table><thead><tr><th>Objection</th><th class="num">Count</th><th>In their words</th><th>Suggested reframe</th></tr></thead>
+      <tbody>${objectionsData.objections.map((o: any) => `<tr>
+        <td><strong>${esc(o.name)}</strong><br><span class="sub">${(o.source_questions ?? []).slice(0, 4).map((q: number) => `Q${q}`).join(", ")}</span></td>
+        <td class="num">${o.count}</td>
+        <td class="sub">“${esc(o.example_quote)}”</td>
+        <td>${esc(o.suggested_reframe)}</td></tr>`).join("")}</tbody></table>
+      <p class="sub" style="margin-top:8px">Clustered from ${objectionsData.negativeRows} negative/inaccurate answers (${objectionsData.windowDays}d), with ${objectionsData.neutralSample} neutral branded answers as contrast. Quotes are verbatim.</p>`;
+
+const sentimentData = readJson("sentiment-by-attribute.json");
+const sentimentCard = !sentimentData
+  ? notComputed("sentiment")
+  : (sentimentData.byTheme ?? []).length === 0
+    ? `<p class="empty">No in-scope mention rows in the window (branded + type:sentiment questions).</p>`
+    : `<p class="sub" style="margin:0 0 10px">${esc(sentimentData.scope ?? "")}. Net-positive = (positive − negative − inaccurate) / total.</p>
+      <table><thead><tr><th>Attribute (theme)</th><th class="num">Pos</th><th class="num">Neu</th><th class="num">Neg</th><th class="num">Inacc</th><th class="num">Net-positive</th><th>WoW</th></tr></thead>
+      <tbody>${sentimentData.byTheme.map((t: any) => `<tr>
+        <td>${esc(t.theme)}</td>
+        <td class="num">${t.counts.positive}</td><td class="num">${t.counts.neutral}</td>
+        <td class="num">${t.counts.negative}</td><td class="num">${t.counts.inaccurate}</td>
+        <td class="num">${t.netPositive === null ? "—" : `${t.netPositive}%`}</td>
+        <td>${t.deltaPts === null ? `<span class="sub">first week</span>` :
+          t.deltaPts > 0 ? `<span class="up">▲ ${t.deltaPts}pt</span>` :
+          t.deltaPts < 0 ? `<span class="down">▼ ${Math.abs(t.deltaPts)}pt</span>` : `<span class="sub">flat</span>`}</td></tr>`).join("")}</tbody></table>`;
+
+const robotsData = readJson("robots-audit.json");
+const robotsCard = !robotsData
+  ? notComputed("robots-audit")
+  : (() => {
+      const faults: string[] = robotsData.faults ?? [];
+      const faultBlock = faults.length === 0
+        ? `<p class="sub" style="margin:0 0 8px"><span class="up">No faults.</span> Every answer-retrieval and search-index crawler can reach the audited paths.</p>`
+        : `<p style="margin:0 0 8px;color:var(--crit)"><strong>${faults.length} FAULT${faults.length === 1 ? "" : "S"}:</strong><br>${faults.map(esc).join("<br>")}</p>`;
+      const hostTables = (robotsData.hosts ?? []).map((h: any) => `<div>
+        <h3>${esc(h.host)} ${h.fetched ? "" : `<span class="down">robots.txt unreachable</span>`}</h3>
+        ${(h.contentSignals ?? []).length ? `<p class="sub">${esc(h.contentSignals.join(" | "))}</p>` : ""}
+        <table><thead><tr><th>Crawler</th><th>Role</th><th>Path</th><th>Governing group</th></tr></thead>
+        <tbody>${(h.crawlers ?? []).map((c: any) => `<tr>
+          <td>${esc(c.crawler)}</td><td class="sub">${esc(c.role)}</td>
+          <td>${c.rootAllowed ? `<span class="up">allowed</span>` : c.fault ? `<span class="down">BLOCKED</span>` : `<span class="sub">blocked (policy)</span>`}</td>
+          <td class="sub">[${esc(c.group)}]</td></tr>`).join("")}</tbody></table></div>`).join("");
+      return `${faultBlock}
+        <p class="sub" style="margin:0 0 10px">llms.txt: ${robotsData.llmsTxt?.ok ? `<span class="up">reachable (200)</span>` : `<span class="down">NOT OK (${robotsData.llmsTxt?.status ?? "unreachable"})</span>`}</p>
+        <div class="row">${hostTables}</div>
+        <p class="sub" style="margin-top:8px">A blocked answer-retrieval or search-index crawler is a fault (it zeroes a surface's ability to cite us). A blocked training crawler is a policy choice, noted only.</p>`;
+    })();
+
 const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -679,6 +791,16 @@ ul.blist { margin:4px 0 0 16px; padding:0 } ul.blist li { margin:4px 0; font-siz
 </div>
 
 <div class="card"><h2>App vs API — what buyers see against what the API returns</h2>${divergenceCard}</div>
+
+<div class="card"><h2>Visibility rank — ${esc(BRAND_NAME)} vs every competitor, 7d vs prior 7d</h2>${rankCard}</div>
+
+<div class="card"><h2>Routing — validation × discovery, per theme (14d)</h2>${routingCard}</div>
+
+<div class="card"><h2>Objections — what the engines hold against ${esc(BRAND_NAME)} (14d)</h2>${objectionsCard}</div>
+
+<div class="card"><h2>Sentiment by attribute — branded &amp; sentiment questions (14d)</h2>${sentimentCard}</div>
+
+<div class="card"><h2>Robots audit — can the AI crawlers get in?</h2>${robotsCard}</div>
 
 <div class="card"><h2>Next actions — generated from this week's gaps</h2>
 <div class="row3">
