@@ -108,6 +108,26 @@ gsc:
 	bun scripts/gsc.ts pages
 	bun scripts/gsc.ts coverage
 
+# Rank pages by the clicks a fix would earn - a recover / ctr / rank lever per
+# page against a soft CTR curve, plus near-miss queries. Needs `make gsc`
+# pulls. Writes data/opportunity.json; treat it as an ordering, not a forecast.
+opportunity:
+	bun scripts/opportunity.ts
+
+# Per-edit measurement: enroll a page the day an edit ships, read the +28d and
+# +56d numbers when due. The reported number is the control-adjusted lift -
+# page clicks change minus rest-of-site clicks change - so a rising tide reads
+# as zero. NOTE passes through make and the shell; for notes carrying $ or
+# double quotes, call `bun scripts/edit-measure.ts enroll` directly.
+edit-enroll:
+	bun scripts/edit-measure.ts enroll "$(URL)" --note "$(NOTE)"
+
+edit-read:
+	bun scripts/edit-measure.ts read
+
+edit-report:
+	bun scripts/edit-measure.ts report
+
 # Snapshot the DB to a release on a PRIVATE repo. No-op unless BACKUP_REPO is
 # set. Never point this at a public repo: release assets inherit visibility.
 backup:
@@ -115,4 +135,5 @@ backup:
 
 .PHONY: seed dry-run run run-core retry serp serp-core apps apps-dry apps-check \
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
-        content-coverage competitors gsc-auth gsc backup test
+        content-coverage competitors gsc-auth gsc backup test \
+        opportunity edit-enroll edit-read edit-report
