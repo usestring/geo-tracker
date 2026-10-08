@@ -20,6 +20,9 @@ const ANSWER_MAX_CHARS = 1500;
 const NEUTRAL_CAP = 40;
 
 const db = new Database(DB_PATH, { readonly: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 if (!ANTHROPIC_KEY) {

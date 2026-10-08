@@ -291,6 +291,9 @@ const PROVIDERS: { model: string; keyEnv: string; adapter: Adapter }[] = [
 // --- run --------------------------------------------------------------------
 
 const db = new Database(DB_PATH);
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 // Which concrete provider model answered each row. Added Aug 19 2026 with the
 // Gemini model chain: `model` stays the surface name ('gemini') so every trend

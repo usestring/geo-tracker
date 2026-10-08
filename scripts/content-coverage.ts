@@ -24,6 +24,9 @@ if (!ANTHROPIC_KEY) {
 }
 
 const db = new Database("data/geo.db", { readonly: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 // Judge stability is load-bearing here: the Monday review reports week-over-week
 // movement in these verdicts, so judge noise reads as a content change that

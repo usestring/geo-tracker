@@ -10,6 +10,7 @@ const argOf = (n) => process.argv.find(a => a.startsWith(`--${n}=`))?.split('=')
 const DATE = argOf('date') ?? new Date().toISOString().slice(0, 10)
 const N = Number(argOf('n') ?? 20)
 const db = new Database(new URL('../../data/geo.db', import.meta.url).pathname, { readonly: true })
+db.run('PRAGMA busy_timeout = 30000')
 const qs = db.query(`SELECT id, text FROM questions WHERE active=1 AND tags LIKE '%tier:daily%' ORDER BY id LIMIT ?`).all(N)
 const row = db.query(`SELECT serp_state, json_array_length(citations) n, error FROM runs WHERE question_id=? AND model=? AND date(run_ts)=? ORDER BY (error IS NULL) DESC, id DESC LIMIT 1`)
 

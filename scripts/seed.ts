@@ -51,6 +51,9 @@ function parseCsv(text: string): string[][] {
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH, { create: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 db.exec(await Bun.file(join(ROOT, "schema.sql")).text());
 
 const [header, ...rows] = parseCsv(await Bun.file(join(ROOT, "questions.csv")).text());
