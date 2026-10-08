@@ -148,14 +148,29 @@ competitors:
 
 # --- Google Search Console (optional) ---------------------------------------
 # gsc-auth  one-time browser consent (needs GSC_CLIENT_ID/SECRET in .env)
-# gsc       queries + pages + index coverage, CSVs into data/gsc/
+# gsc       queries + pages + query x page + index coverage, CSVs into data/gsc/
 gsc-auth:
 	bun scripts/gsc.ts auth
 
 gsc:
 	bun scripts/gsc.ts queries
 	bun scripts/gsc.ts pages
+	bun scripts/gsc.ts query-pages
 	bun scripts/gsc.ts coverage
+
+# Daily GSC pull for the search feedback loop. Writes to data/gsc/daily/ so
+# the weekly scripts' latest-vs-second-latest diffs stay week over week. No
+# coverage sweep: that stays weekly.
+gsc-daily:
+	bun scripts/gsc.ts queries --daily
+	bun scripts/gsc.ts pages --daily
+	bun scripts/gsc.ts query-pages --daily
+
+# Six action lists from the newest pull -> data/search-feedback.json: low CTR,
+# near page 1, losing, new queries, wrong intent, and dead pages that still
+# earn impressions. Set SEARCH_BRANDED_TERMS / SEARCH_CATEGORY_TERMS in .env.
+search-feedback:
+	bun scripts/search-feedback.ts
 
 # Rank pages by the clicks a fix would earn - a recover / ctr / rank lever per
 # page against a soft CTR curve, plus near-miss queries. Needs `make gsc`
@@ -186,4 +201,5 @@ backup:
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
         content-coverage competitors gsc-auth gsc backup test \
         rank routing objections sentiment robots-audit weekly-measure daily-report \
-        opportunity edit-enroll edit-read edit-report
+        opportunity edit-enroll edit-read edit-report \
+        gsc-daily search-feedback
