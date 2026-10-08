@@ -4,17 +4,8 @@
 // the same path. The rules encoded here come from that surface's Aug 11 egress
 // change and are repeated in full because they are the reason this file exists:
 //
-// PUPPETEER, NOT PLAYWRIGHT, and that is not a preference.
-// `chromium.connectOverCDP()` hangs against wss://request.usestring.ai/v1/wss
-// until timeout, reproduced at 60s and at 180s, never completing a single CDP
-// round trip. The endpoint is healthy — the socket opens, Browser.getVersion
-// answers, Target.getTargets lists a page. The likely cause is in that listing:
-// the page target is already `attached: true` when Playwright connects, and
-// Playwright waits on an attachedToTarget event a pre-attached target never
-// re-emits. `puppeteer.connect()` against the same URL succeeds in 1.2s. This is
-// a filed product bug — portal.usestring.ai/docs/browser/playwright tells
-// customers to use playwright-core with connectOverCDP, and that path does not
-// work. Do not "fix" a surface by switching it back to Playwright.
+// This module connects with puppeteer-core (`puppeteer.connect()`), which
+// opens a session in about 1.2s. Keep the surfaces on puppeteer-core.
 //
 // Session rules from the /wss docs that callers have to respect:
 //   1. Sessions are killed at 30 minutes. A 200-question pass runs longer than

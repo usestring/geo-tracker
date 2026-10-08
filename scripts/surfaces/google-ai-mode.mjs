@@ -3,11 +3,11 @@
 // Why this exists: the String-API fetch path snapshots the page at load, but AI
 // Mode streams its answer in afterwards, so 97% of fetch rows came back as
 // shells with zero answer text (measured Aug 10: 435KB of HTML, 546 chars of
-// visible text, no provider names anywhere). The API's `actions` wait path was
-// tried first and hangs indefinitely on google.com URLs specifically (works on
-// example.com) — flagged to eng as product feedback. Until that is fixed, this
-// browser surface owns the measurement, same stability-wait pattern as
-// perplexity-app.mjs.
+// visible text, no provider names anywhere). This browser surface waits for the
+// answer to settle before reading it, the same stability-wait pattern as
+// perplexity-app.mjs. Since Sep 29 2026 the default path reads AI Mode from
+// String's /v1/search instead (see google-search.mjs); this file runs only
+// with GOOGLE_VIA_BROWSER=1.
 //
 // Rows keep the model value 'google-ai-mode' so the trend line continues, and
 // are written with serp_state='answer' so extract.ts skips the envelope parse.
@@ -67,8 +67,7 @@
 // each time), so both Google surfaces moved to standard. Sep 11: standard 0 of
 // 24, premium 4 of 6 on the identical request. Neither pool is reliably the
 // good one, so the pool now starts on AI_MODE_PROXY (default standard) and
-// flips tier on every block-triggered reconnect. Either tier pointed at
-// Google gets challenged in waves.
+// flips tier on every block-triggered reconnect.
 //
 // AI_MODE_LOCAL=1 forces a local browser. Offline debugging only — from this
 // machine Google blocks the home IP outright.
