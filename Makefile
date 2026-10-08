@@ -21,18 +21,22 @@ run-core:
 retry:
 	bun scripts/run-daily.ts --failed-today
 
-# --- Google surfaces (hosted CDP browser, logged out) -----------------------
-# Google streams its AI answer in after page load, so neither surface can be
-# measured with a fetch snapshot. Both drive a real browser and wait for the
-# answer to settle. Same daily/weekly split as the engine APIs; both resume,
-# so a re-run only retries failures.
+# --- Google surfaces (AI Mode + AI Overviews) -------------------------------
+# Both surfaces read String's search endpoint (POST /v1/search, STRING_API_KEY)
+# by default. GOOGLE_VIA_BROWSER=1 puts back the hosted-browser path, which
+# waits for the streamed answer to settle in a real browser. Same daily/weekly
+# split as the engine APIs; both resume, so a re-run only retries failures.
+#
+# Both surfaces always run. run-apps exits 2 when a surface alerts, and
+# without the leading `-` make would stop after google-ai-mode and never ask
+# google-aio. Read the ALERT lines in the output, not the exit code.
 serp-core:
-	bun scripts/run-apps.ts --only=google-ai-mode --core
-	bun scripts/run-apps.ts --only=google-aio --core
+	-bun scripts/run-apps.ts --only=google-ai-mode --core
+	-bun scripts/run-apps.ts --only=google-aio --core
 
 serp:
-	bun scripts/run-apps.ts --only=google-ai-mode
-	bun scripts/run-apps.ts --only=google-aio
+	-bun scripts/run-apps.ts --only=google-ai-mode
+	-bun scripts/run-apps.ts --only=google-aio
 
 # --- tests ------------------------------------------------------------------
 # Fakes the hosted browser, so no network and no browser credits are spent.

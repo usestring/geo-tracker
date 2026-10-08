@@ -51,16 +51,27 @@
 //
 // GOOGLE_AIO_LOCAL=1 forces a local browser. Offline debugging only — from this
 // machine Google blocks the home IP outright.
-import { createSessionPool, dismissConsent, sleep, blockedError, DEAD_PAGE_RE } from './cdp-session.mjs'
+import {
+  createSessionPool,
+  dismissConsent,
+  sleep,
+  blockedError,
+  DEAD_PAGE_RE,
+  MID_NAVIGATION_RE,
+  COLLECT_GOOGLE_SOURCES_SRC,
+  resolveGoogleSources,
+} from './cdp-session.mjs'
 
 const USE_LOCAL = process.env.GOOGLE_AIO_LOCAL === '1' || !process.env.STRING_API_KEY
 
+// Start on standard (Aug 24: premium 0 of 7, standard 5 of 6) but do not stay
+// there when it fails: Sep 11 measured standard 0 of 24 and premium 4 of 6 on
+// the same request. A block flips the tier - see TIER ROTATION in cdp-session.mjs.
+const PRIMARY_TIER = process.env.GOOGLE_AIO_PROXY ?? 'standard'
 const pool = createSessionPool({
   local: USE_LOCAL,
   sessionMs: Number(process.env.GOOGLE_AIO_SESSION_MS ?? 20 * 60 * 1000),
-  // 'standard', not 'premium': Google challenges 100% of premium exits as of
-  // Aug 24 2026. Full measurement in the PROXY TIER note in google-ai-mode.mjs.
-  proxy: process.env.GOOGLE_AIO_PROXY ?? 'standard',
+  proxies: [PRIMARY_TIER, PRIMARY_TIER === 'premium' ? 'standard' : 'premium'],
   country: process.env.GOOGLE_AIO_COUNTRY ?? 'US',
 })
 
@@ -115,33 +126,17 @@ async function readState(page) {
   })()`)
 }
 
-/** Citations, scoped to the overview container. */
+/** Citations, scoped to the overview container. See collectGoogleSources for
+ *  the three reads and why the anchor read alone went to zero on Aug 26. */
 async function readCitations(page) {
-  return page.evaluate(`(() => {
+  const got = await page.evaluate(`(() => {
     const c = ${FIND_CONTAINER};
-    if (!c) return [];
-    const out = new Map();
-    c.querySelectorAll('a[href]').forEach((a) => {
-      let href = a.href;
-      if (href.startsWith('https://www.google.com/url?')) {
-        const u = new URL(href);
-        const q = u.searchParams.get('q') || u.searchParams.get('url');
-        if (q) href = q;
-      }
-      if (!/^https?:\\/\\//.test(href)) return;
-      let host;
-      try { host = new URL(href).hostname; } catch { return; }
-      if (
-        /(^|\\.)google\\.(com|[a-z]{2})$/.test(host) ||
-        host === 'accounts.google.com' ||
-        host === 'support.google.com' ||
-        host === 'policies.google.com' ||
-        host === 'maps.google.com'
-      ) return;
-      if (!out.has(href)) out.set(href, { url: href, title: (a.textContent || '').trim().slice(0, 200) });
-    });
-    return [...out.values()];
+    if (!c) return null;
+    return (${COLLECT_GOOGLE_SOURCES_SRC})(c, null);
   })()`)
+  if (!got) return []
+  // The folded "(+N)" sources: resolve their /goto tokens to page URLs.
+  return (await resolveGoogleSources(got.pageWide, got.gotos?.pageWide ?? [])).citations
 }
 
 /**
@@ -165,7 +160,14 @@ async function askOnce(question, timeoutMs) {
 
   while (Date.now() < deadline) {
     await sleep(POLL_MS)
-    const s = await readState(page)
+    let s
+    try {
+      s = await readState(page)
+    } catch (e) {
+      // The challenge interstitial navigating under the poll - see MID_NAVIGATION_RE.
+      if (MID_NAVIGATION_RE.test(String(e?.message ?? e))) continue
+      throw e
+    }
     if (s.blocked) throw blockedError('BLOCKED: Google served a traffic challenge instead of a SERP')
     if (s.notice) sawNotice = true
 
@@ -224,21 +226,25 @@ export async function launch() {
  */
 const RECOVERABLE = DEAD_PAGE_RE
 
+// Three attempts: the first on the current tier, then one on each tier after a
+// block flips it. A challenge tracks the exit IP far more often than the query,
+// so a fresh session is a real second chance - but some queries (defeating
+// CAPTCHA, defeating Cloudflare) are refused from any address, and retrying
+// those harder only spends bandwidth. A blocked attempt costs ~5s and ~50KB.
+const MAX_ATTEMPTS = 3
+
 export async function ask(page, question, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  try {
-    return await askOnce(question, timeoutMs)
-  } catch (e) {
-    const blocked = e.code === 'BLOCKED'
-    const dropped = RECOVERABLE.test(String(e?.message ?? e))
-    if ((!blocked && !dropped) || USE_LOCAL) throw e
-    // Exactly one retry, either way. A challenge tracks the exit IP far more
-    // often than the query, so a fresh session is a real second chance — but
-    // some queries (defeating CAPTCHA, defeating Cloudflare) are refused from
-    // any address, and retrying those harder only spends bandwidth.
-    console.log(
-      `  ${blocked ? 'blocked' : 'session dropped'}, retrying on a fresh session: ${question.slice(0, 60)}`
-    )
-    await pool.ensure({ force: true })
-    return await askOnce(question, timeoutMs)
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await askOnce(question, timeoutMs)
+    } catch (e) {
+      const blocked = e.code === 'BLOCKED'
+      const dropped = RECOVERABLE.test(String(e?.message ?? e))
+      if ((!blocked && !dropped) || USE_LOCAL || attempt >= MAX_ATTEMPTS) throw e
+      console.log(
+        `  ${blocked ? 'blocked' : 'session dropped'}, retrying on a fresh session (${attempt}/${MAX_ATTEMPTS}): ${question.slice(0, 60)}`
+      )
+      await pool.ensure({ force: true, rotate: blocked })
+    }
   }
 }
