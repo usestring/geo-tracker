@@ -85,6 +85,12 @@ check-claude:
 extract:
 	bun scripts/extract.ts
 
+# One ranked list of what to write next, across every kind (new page,
+# refresh, queued row): lost answers x prio x coverage verdict, summed per
+# page. Needs `make content-coverage` first. Writes data/daily-picks.json.
+daily-picks:
+	bun scripts/daily-picks.ts
+
 # Competitor posts the engines cite and mention most, grouped by search intent
 # and matched to your own page (data/competitor-posts.json). The dashboard's
 # priority and "copy this" cards read it. The sitemap fetch tolerates failure.
@@ -209,4 +215,4 @@ backup:
         content-coverage competitors gsc-auth gsc backup test \
         rank routing objections sentiment robots-audit weekly-measure daily-report \
         opportunity edit-enroll edit-read edit-report \
-        gsc-daily search-feedback competitor-posts
+        gsc-daily search-feedback competitor-posts daily-picks
