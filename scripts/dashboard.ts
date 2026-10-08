@@ -488,45 +488,25 @@ const buildGroups = THEME_ORDER.map((theme) => ({
 })).filter((g) => g.items.length > 0);
 
 // Copy this: competitor / affiliate pages the engines cite on questions where
-// our own domain is NOT cited. These are the pages to replicate as our own.
-const clsMap = new Map<string, string>();
-for (const row of db.query("SELECT domain, classification FROM domains").all() as { domain: string; classification: string }[]) {
-  clsMap.set(row.domain, row.classification);
-}
-const copyRows = db
-  .query(
-    `SELECT r.question_id qid, q.text qtext, r.citations FROM runs r JOIN questions q ON q.id = r.question_id
-     WHERE r.model IN ('gpt','claude','perplexity','gemini') AND date(r.run_ts) >= date('now','-30 days')
-       AND r.citations IS NOT NULL AND r.citations != '[]'`
-  )
-  .all() as { qid: number; qtext: string; citations: string }[];
-const qCitedHosts = new Map<number, Set<string>>();
-const copyMap = new Map<string, { url: string; domain: string; cls: string; cites: number; qids: Set<number>; sampleQ: string }>();
-for (const row of copyRows) {
-  let urls: string[] = [];
-  try { urls = JSON.parse(row.citations); } catch { continue; }
-  const hs = qCitedHosts.get(row.qid) ?? new Set<string>();
-  for (const u of urls) {
-    const h = host(u);
-    if (!h) continue;
-    hs.add(h);
-    const dom = h.split(".").slice(-2).join(".");
-    const cls = clsMap.get(h) ?? clsMap.get(dom) ?? "";
-    if (cls === "competitor-owned" || cls === "affiliate-benchmark") {
-      const key = u.split("?")[0];
-      const e = copyMap.get(key) ?? { url: key, domain: dom, cls, cites: 0, qids: new Set<number>(), sampleQ: row.qtext };
-      e.cites++; e.qids.add(row.qid); copyMap.set(key, e);
-    }
-  }
-  qCitedHosts.set(row.qid, hs);
-}
-const isLost = (qid: number) =>
-  ![...(qCitedHosts.get(qid) ?? new Set())].some((h) => isOwnDomain(h as string));
-const copyTargets = [...copyMap.values()]
-  .map((e) => ({ ...e, lostQ: [...e.qids].filter(isLost) }))
-  .filter((e) => e.lostQ.length > 0)
-  .sort((a, b) => b.cites - a.cites || b.lostQ.length - a.lostQ.length)
-  .slice(0, 15);
+// our own domain is NOT cited. Read from data/competitor-posts.json (make
+// competitor-posts), the same ranking the priority card below uses. It counts
+// one answer once per page and keeps only the latest row per question,
+// surface and day, so retry rows are not counted twice.
+const COMPETITOR_POSTS_PATH = join(import.meta.dir, "..", "data", "competitor-posts.json");
+const competitorPosts: any | null = existsSync(COMPETITOR_POSTS_PATH)
+  ? (() => { try { return JSON.parse(readFileSync(COMPETITOR_POSTS_PATH, "utf8")); } catch { return null; } })()
+  : null;
+const copyTargets = !competitorPosts ? [] : [
+  ...competitorPosts.posts.map((t: any) => ({ ...t, cls: "competitor-owned" })),
+  ...competitorPosts.affiliatePosts.map((t: any) => ({ ...t, cls: "affiliate-benchmark" }))
+]
+  .filter((t: any) => t.lostQuestions > 0 && t.pageType !== "home" && t.pageType !== "account")
+  .sort((a: any, b: any) => b.citations - a.citations || b.lostQuestions - a.lostQuestions)
+  .slice(0, 15)
+  .map((t: any) => ({
+    url: t.url, domain: t.domain, cls: t.cls, cites: t.citations, lostQ: t.lostQids as number[],
+    sampleQ: qText.get(t.lostQids[0]) ?? ""
+  }));
 
 
 const DEC_LABEL: Record<string, string> = {
@@ -545,13 +525,59 @@ const buildCard = buildGroups.length === 0
       <ul class="blist">${g.items.map((i) => `<li>${esc(i.question)}${i.gap ? `<span class="sub"> — ${esc(i.gap)}</span>` : ""}</li>`).join("")}</ul>
     </div>`).join("");
 
-const copyCard = copyTargets.length === 0
+const copyCard = !competitorPosts
+  ? `<p class="empty">Not yet computed. Run <code>make competitor-posts</code>, then regenerate.</p>`
+  : copyTargets.length === 0
   ? `<p class="empty">No competitor pages cited on lost questions this window.</p>`
   : `<p class="sub" style="margin:0 0 10px">Pages the engines cite on questions we lose. Write our own version of each; the citation count is the demand behind it.</p>
-    <ol class="copyl">${copyTargets.map((t) => `<li>
+    <ol class="copyl">${copyTargets.map((t: any) => `<li>
       <a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 82))}</a>
       <span class="chip ${CLS_LABEL[t.cls] ?? "new"}">${esc(t.domain)}</span>
       <span class="sub">×${t.cites} citations · wins ${t.lostQ.length} question${t.lostQ.length === 1 ? "" : "s"} we lose · e.g. "${esc(t.sampleQ.slice(0, 60))}"</span></li>`).join("")}</ol>`;
+
+// Competitor posts winning the engines: what to write next.
+const SP_LABEL: Record<string, string> = {
+  live: "live", drafted: "draft waiting", queued: "queued", none: "no page: write it", unknown: "unchecked"
+};
+const priorityCard = !competitorPosts
+  ? `<p class="empty">Not yet computed. Run <code>make competitor-posts</code>, then regenerate.</p>`
+  : (() => {
+      const d = competitorPosts;
+      const trend = (cur: number, prev: number) =>
+        !d.prevWindow.complete ? `<span class="sub">no full prior</span>` :
+        prev === 0 ? `<span class="sub">new</span>` :
+        cur >= prev ? `<span class="up">▲ ${Math.round((100 * (cur - prev)) / prev)}%</span>` :
+        `<span class="down">▼ ${Math.round((100 * (prev - cur)) / prev)}%</span>`;
+      const spCell = (sp: any, i: any) => `<span class="chip sp-${sp.status}">${SP_LABEL[sp.status] ?? sp.status}</span>` +
+        (sp.status === "none" && i.nearOwnPages?.length ? `<br><span class="sub">close to: ${esc(i.nearOwnPages.map((n: any) => n.slug + " (" + n.status + ")").join(", "))}</span>` : "") +
+        (sp.slug ? `<br><span class="sub">${sp.url ? `<a href="${esc(sp.url)}" target="_blank" rel="noopener">${esc(sp.slug)}</a>` : esc(sp.slug)}${sp.queueRow ? ` · queue row ${sp.queueRow}` : ""}</span>` : "");
+      const intentRows = d.intents.slice(0, 12).map((i: any) => `<tr class="${i.ownPage.status === "none" ? "sp-gap" : ""}">
+        <td class="num"><strong>${i.priority}</strong></td>
+        <td><strong>${esc(i.label)}</strong><br><span class="sub">e.g. "${esc((i.sampleQuestion || "").slice(0, 70))}"</span></td>
+        <td><a href="${esc(i.topUrl)}" target="_blank" rel="noopener">${esc(i.topUrl.replace(/^https?:\/\//, "").slice(0, 60))}</a>
+          <br><span class="sub">${i.urls.length} competitor page${i.urls.length === 1 ? "" : "s"}: ${esc(i.owners.slice(0, 4).join(", "))}${i.owners.length > 4 ? "…" : ""}</span></td>
+        <td class="num">${i.citations}<br>${trend(i.citations, i.prevCitations)}</td>
+        <td class="num">${i.mentions ?? "—"}<br><span class="sub">${i.mentions !== null && i.citations ? Math.round((100 * i.mentions) / i.citations) + "%" : "not tracked"}</span></td>
+        <td class="num">${i.lostQuestions}</td>
+        <td>${spCell(i.ownPage, i)}</td></tr>`).join("");
+      const postRows = d.posts.slice(0, 15).map((t: any) => `<tr>
+        <td class="num">${t.priority}</td>
+        <td><a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.url.replace(/^https?:\/\//, "").slice(0, 72))}</a> <span class="sub">${t.pageType}</span></td>
+        <td class="num">${t.citations}</td><td class="num">${t.mentions ?? "—"}</td>
+        <td class="num sub">#${t.citationRank} / ${t.mentionRank ? "#" + t.mentionRank : "—"}</td>
+        <td class="num">${t.lostQuestions}</td></tr>`).join("");
+      const gaps = d.intents.slice(0, 12).filter((i: any) => i.ownPage.status === "none").length;
+      const waiting = d.intents.slice(0, 12).filter((i: any) => i.ownPage.status === "drafted").length;
+      return `<p class="sub" style="margin:0 0 10px">The competitor pages the engines cite most, and how often the citing answer also names the competitor, over ${d.window.days} days (${d.window.from} to ${d.window.to}, ${d.usableRows} discovery answers). Pages are grouped by the search intent they answer.
+        <strong>A topic leads when it ranks high on citations OR on mentions.</strong>
+        In the top 12: <strong>${gaps}</strong> with no page of yours, <strong>${waiting}</strong> with a draft that is not published.</p>
+      <table><thead><tr><th class="num">#</th><th>Topic</th><th>Top competitor post</th><th class="num">Citations<br><span class="sub">vs prior ${d.window.days}d</span></th><th class="num">Mentions<br><span class="sub">of owner</span></th><th class="num">Qs we lose</th><th>Our page</th></tr></thead>
+      <tbody>${intentRows}</tbody></table>
+      <details style="margin-top:10px"><summary>Top 15 individual competitor posts</summary>
+      <table><thead><tr><th class="num">#</th><th>Post</th><th class="num">Citations</th><th class="num">Mentions</th><th class="num">Rank cites / mentions</th><th class="num">Qs we lose</th></tr></thead>
+      <tbody>${postRows}</tbody></table></details>
+      <p class="sub" style="margin-top:8px">Counts one answer once per page; latest row per question, surface and day; the four engine APIs and Google AI Overviews (AI Mode excluded); branded and diagnostic questions excluded. "Not tracked" means the mention extractor does not record that competitor (add it to COMPETITOR_NAMES), so the topic competes on citations alone. Source: <code>data/competitor-posts.json</code>.</p>`;
+    })();
 
 const writeList = writeTargets.length === 0 ? `<p class="empty">No zero-presence questions with content-shaped winners this week.</p>` :
   `<ol>${writeTargets.map((t) => `<li><span class="qname">${esc(qText.get(t.qid) ?? "")}</span><br>
@@ -740,6 +766,12 @@ td.qt { max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:no
 .pip.none { background:transparent; border:1px dashed var(--axis) }
 .legend { display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:var(--ink2); margin:8px 2px 0 }
 .legend .pip { vertical-align:-2px; margin-right:5px }
+.card.priority { border:2px solid var(--s2) }
+.chip.sp-live { background:color-mix(in srgb,var(--good) 20%,var(--surface)) }
+.chip.sp-drafted { background:color-mix(in srgb,var(--s4) 30%,var(--surface)) }
+.chip.sp-queued { background:color-mix(in srgb,var(--s1) 20%,var(--surface)) }
+.chip.sp-none { background:color-mix(in srgb,var(--crit) 26%,var(--surface)) }
+tr.sp-gap td { background:color-mix(in srgb,var(--crit) 6%,transparent) }
 .chip { display:inline-block; font-size:11.5px; font-weight:600; padding:1.5px 8px; border-radius:99px; color:var(--ink); background:var(--grid) }
 .chip.publisher { background:color-mix(in srgb,var(--s3) 22%,var(--surface)) }
 .chip.affiliate { background:color-mix(in srgb,var(--s4) 26%,var(--surface)) }
@@ -779,6 +811,8 @@ ul.blist { margin:4px 0 0 16px; padding:0 } ul.blist li { margin:4px 0; font-siz
   <div class="tile"><div class="k">Coverage today</div><div class="v">${todayOk}<span style="font-size:16px;color:var(--muted)">/${todayRows.length}</span></div><span class="sub">successful runs / attempted</span></div>
   <div class="tile"><div class="k">Citation ledger</div><div class="v">${domainTotal}</div><span class="sub">domains seen · top ${ledger.length} below</span></div>
 </div>
+
+<div class="card priority"><h2>Competitor posts winning the engines — what to write next</h2>${priorityCard}</div>
 
 <div class="row">
   <div class="card"><h2>Non-branded mention & citation rate by day</h2>${lineChart()}</div>
@@ -879,7 +913,11 @@ await Bun.write(
         mentionedPrev: pct(c.prv.mentioned, c.prv.n), n: c.cur.n
       })),
       competitors: competitors.map(([name, count]) => ({ name, count })),
-      copyTargets: copyTargets.map((t) => ({
+      competitorPriority: (competitorPosts?.intents ?? []).slice(0, 12).map((i: any) => ({
+        priority: i.priority, topic: i.label, topUrl: i.topUrl, citations: i.citations, mentions: i.mentions,
+        lostQuestions: i.lostQuestions, ownPage: i.ownPage.status, ownSlug: i.ownPage.slug ?? null
+      })),
+      copyTargets: copyTargets.map((t: any) => ({
         url: t.url, domain: t.domain, cls: t.cls, cites: t.cites,
         lostQ: t.lostQ.length, sampleQ: t.sampleQ
       })),

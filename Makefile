@@ -85,7 +85,14 @@ check-claude:
 extract:
 	bun scripts/extract.ts
 
+# Competitor posts the engines cite and mention most, grouped by search intent
+# and matched to your own page (data/competitor-posts.json). The dashboard's
+# priority and "copy this" cards read it. The sitemap fetch tolerates failure.
+competitor-posts:
+	bun scripts/competitor-posts.ts
+
 dashboard:
+	-bun scripts/competitor-posts.ts
 	bun scripts/dashboard.ts
 
 # --- measurement pack (rank / routing / objections / sentiment / robots) ----
@@ -202,4 +209,4 @@ backup:
         content-coverage competitors gsc-auth gsc backup test \
         rank routing objections sentiment robots-audit weekly-measure daily-report \
         opportunity edit-enroll edit-read edit-report \
-        gsc-daily search-feedback
+        gsc-daily search-feedback competitor-posts
