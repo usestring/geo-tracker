@@ -15,6 +15,7 @@
 // Writes data/content-coverage.json and prints a summary. Read-only against
 // the site; the only writes are that file. Uses ANTHROPIC_API_KEY from .env.
 import { Database } from "bun:sqlite";
+import { BRAND_SITE, isOwnDomain } from "./brand.ts";
 
 const SITE = process.env.COVERAGE_SITE ?? BRAND_SITE;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
