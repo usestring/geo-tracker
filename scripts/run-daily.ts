@@ -281,9 +281,8 @@ const PROVIDERS: { model: string; keyEnv: string; adapter: Adapter }[] = [
   // Measurements and the parser post-mortem are in surfaces/google-aio.mjs.
   // google-ai-mode retired from this runner Aug 10: AI Mode streams its answer
   // in after page load, so the fetch snapshot caught a shell 97% of the time
-  // (median 546 chars of text out of 435KB of HTML, zero provider names). The
-  // API's `actions` wait path hangs on google.com URLs specifically — reported
-  // to eng. The measurement now runs as a Playwright surface:
+  // (median 546 chars of text out of 435KB of HTML, zero provider names). Both
+  // Google surfaces now run from run-apps.ts and read String's /v1/search:
   //   bun scripts/run-apps.ts --only=google-ai-mode
   // daily, from the scheduled routine, writing the same model value.
 ];
