@@ -14,7 +14,7 @@
 // Reading it: if some configs answer and others are challenged, the fingerprint
 // is fine and a proxy pool's reputation is the problem, so change the tier or
 // the country. If every config is challenged with a different exit IP each time,
-// the fingerprint is the problem and it needs eng.
+// the browser fingerprint is the problem, not the pool.
 //
 // Aug 24 2026 was the first case: premium 0 of 7, standard 5 of 6. That moved
 // both Google surfaces onto the standard tier.
