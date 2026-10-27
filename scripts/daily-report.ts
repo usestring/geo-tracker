@@ -14,6 +14,9 @@ import { BRAND_NAME } from "./brand.ts";
 const DB_PATH = join(import.meta.dir, "..", "data", "geo.db");
 const OUT = join(import.meta.dir, "..", "data", "daily-report.html");
 const db = new Database(DB_PATH, { readonly: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 const esc = (s: string) =>
   String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

@@ -40,6 +40,14 @@ import * as claudeApp from "./surfaces/claude-app.mjs";
 import * as perplexityApp from "./surfaces/perplexity-app.mjs";
 import * as googleAiMode from "./surfaces/google-ai-mode.mjs";
 import * as googleAio from "./surfaces/google-aio.mjs";
+import { searchSurface } from "./surfaces/google-search.mjs";
+
+// Both Google surfaces read String's /v1/search since Sep 29 2026, not the
+// hosted browser (see surfaces/google-search.mjs). GOOGLE_VIA_BROWSER=1 puts
+// the browser path back for a side-by-side check.
+const VIA_BROWSER = process.env.GOOGLE_VIA_BROWSER === "1";
+const aiModeSearch = searchSurface("google_ai_mode");
+const aioSearch = searchSurface("google");
 
 const DB_PATH = join(import.meta.dir, "..", "data", "geo.db");
 
@@ -55,6 +63,88 @@ const FORCE = process.argv.includes("--force");
 const CORE_ONLY = process.argv.includes("--core");
 const ONLY = argOf("only");
 const LIMIT = Number(argOf("limit")) || 0;
+
+// Every browser call below is a bare `await` on a promise the page controls. A
+// page that stops answering never rejects, so the surrounding try/catch cannot
+// see it: the pass just stops, mid-surface, with no error row, no FAIL line and
+// no ALERT. On 2026-08-21 that cost a Friday run three hours - claude-app hung
+// before its first question and sat at 0.0% CPU until it was killed by hand,
+// while the routine's own alert path waited on a throw that never came.
+//
+// Turning the hang into a rejection is the whole fix. The error row, the
+// surface-level catch and the ALERT marker downstream all already do the right
+// thing once something is actually thrown.
+class TimeoutError extends Error {
+  code = "TIMEOUT";
+  constructor(label: string, ms: number) {
+    super(`timed out after ${Math.round(ms / 1000)}s waiting for ${label}`);
+  }
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new TimeoutError(label, ms)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer!));
+}
+
+// Ceilings, not targets: every one sits above the slowest LEGITIMATE path, so a
+// trip means something is wrong rather than slow. The slowest legitimate ask is
+// google-ai-mode's question retried to its third attempt: ~160s per attempt
+// (10s warm-up + 60s goto + 90s answer poll), reconnects with backoff between,
+// ~520s total. The app surfaces' own internal deadlines are 150-180s and return
+// gracefully with partial text. An outer ceiling below any of those converts
+// working questions into TIMEOUT rows and can kill a healthy pass through the
+// consecutive-timeout breaker.
+const LAUNCH_TIMEOUT_MS = 120_000;
+const READY_TIMEOUT_MS = 90_000;
+const ASK_TIMEOUT_MS = 600_000;
+// A page that times out three times running is dead, not slow. Stopping the
+// surface there keeps a 200-question bank from spending 10 hours proving it.
+const MAX_CONSECUTIVE_TIMEOUTS = 3;
+// A surface can also grind without ever tripping the timeout breaker: sessions
+// that open cleanly and die on first use fail fast with uncoded errors, one
+// reconnect per question. Any-error streaks are bounded too.
+const MAX_CONSECUTIVE_FAILURES = 8;
+// Google traffic challenges are NOT grinding, and counting them here stops a
+// healthy pass. The two Google surfaces open a pass by getting blocked and then
+// recover on their own, because every block already forces a new exit IP.
+// Measured on the Aug 21 google-ai-mode full pass, in order:
+//   q1-q8    blocked (8)   -> q9-q12   answered
+//   q13-q26  blocked (14)  -> q27-q61  answered, 35 in a row
+// So an 8-failure bound kills that pass before its first usable row, and a
+// 14-failure bound kills it before the 35-row run. On Aug 24 it did exactly
+// that: q1-q8 blocked, breaker fired, zero Google rows for the day.
+// Blocks get their own, higher bound. It still stops a genuine all-day block.
+//
+// CORRECTED Sep 1 2026. The Aug 31 version read "scale to the bank" as 12.5%
+// with a floor of 15, which made the breaker MORE aggressive on a core day,
+// not less: 12.5% of 58 is 8, so the floor governed and the bound fell from
+// 25 to 15. It fired the same day - google-ai-mode stopped at 45 of 58 after
+// a 15-block run, leaving 13 questions unmeasured.
+//
+// The bound must clear the longest recovery run we have measured. Aug 21 saw
+// 14 consecutive blocks followed by 35 clean answers in a row, so anything at
+// or under ~14 kills passes that would have finished. The floor is therefore
+// 25 (the long-standing safe value), and the percentage only ever raises it
+// for a bigger bank: 12.5% of the 295-question Friday pass is 37.
+const maxConsecutiveBlocks = (bankSize: number) =>
+  Math.max(25, Math.ceil(bankSize * 0.125));
+
+// WAVES (Sep 11 2026). Blocks arrive in waves that last minutes, not hours.
+// On Sep 10 google-ai-mode took 25 blocks in a row between 14:18 and 14:23 UTC
+// and the breaker killed it; google-aio started on the same pool at 14:28 and
+// answered 40 of 58. Since Sep 1 every blocked run has lasted 0.4-25 minutes
+// and every clean run 7-12 minutes (the life of Google's DV cookie), so the
+// cheapest recovery is to wait, not to stop. After this many blocks in a row
+// the surface closes its browser (nothing bills while it waits), sleeps, and
+// relaunches. Three pauses, doubling; the absolute breaker above still ends a
+// pass that stays blocked through all of them.
+const BLOCK_WAVE_TRIGGER = 8;
+const BLOCK_WAVE_PAUSES_MS = [3, 6, 12].map((m) => m * 60_000);
 
 // One ChatGPT pass a week. Six days rather than seven so a weekly cron that
 // drifts an hour earlier is not silently skipped.
@@ -138,8 +228,8 @@ const SURFACES: Surface[] = [
     loggedIn: false,
     allQuestions: true,
     serpState: "answer",
-    launch: (opts) => googleAiMode.launch(opts),
-    ask: (page, q) => googleAiMode.ask(page, q),
+    launch: (opts) => (VIA_BROWSER ? googleAiMode.launch(opts) : aiModeSearch.launch()),
+    ask: (page, q) => (VIA_BROWSER ? googleAiMode.ask(page, q) : aiModeSearch.ask(page, q)),
   },
   {
     // Also not an app: the daily AI Overviews measurement, moved here from
@@ -153,12 +243,15 @@ const SURFACES: Surface[] = [
     model: "google-aio",
     loggedIn: false,
     allQuestions: true,
-    launch: (opts) => googleAio.launch(opts),
-    ask: (page, q) => googleAio.ask(page, q),
+    launch: (opts) => (VIA_BROWSER ? googleAio.launch(opts) : aioSearch.launch()),
+    ask: (page, q) => (VIA_BROWSER ? googleAio.ask(page, q) : aioSearch.ask(page, q)),
   },
 ];
 
 const db = new Database(DB_PATH);
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 const placeholders = TIER1_QUESTION_IDS.map(() => "?").join(",");
 let questions = db
@@ -251,10 +344,16 @@ const lastRunDays = (model: string): number | null => {
   return row?.days ?? null;
 };
 
+// Name each surface with the bank it actually asks. The old line reported
+// `questions.length` ("15 tier-1 questions") for every surface, including the
+// allQuestions ones that ask all 200 - so a correct weekly SERP pass announced
+// itself as a 15-question sample. On 2026-08-21 that nearly caused a healthy
+// 200-question run to be killed as misconfigured. The count is load-bearing:
+// it is the first thing anyone checks to confirm the right pass is running.
 console.log(
-  `${questions.length} tier-1 questions x ${selected.length} app surfaces (${selected
-    .map((s) => s.model)
-    .join(", ")})`
+  `${selected.length} app surfaces: ${selected
+    .map((s) => `${s.model} (${bankFor(s).length} q${s.allQuestions ? `, full bank${CORE_ONLY ? ", core" : ""}` : ", tier-1"})`)
+    .join(", ")}`
 );
 
 if (DRY_RUN) {
@@ -319,20 +418,50 @@ for (const surface of selected) {
     continue;
   }
 
+  // `withTimeout` abandons the losing promise but cannot cancel it: a launch
+  // that completes after its deadline hands back a live browser (and for the
+  // Google surfaces, assigns the module-level session) that nothing references.
+  // Keep the raw promise so the late arrival is closed instead of billing until
+  // the hosted 30-minute kill.
+  const launchSurface = async (label: string) => {
+    const launching = surface.launch({ headless: !HEADED });
+    try {
+      return await withTimeout(launching, LAUNCH_TIMEOUT_MS, label);
+    } catch (e) {
+      launching.then((c: any) => c?.close?.()).catch(() => {});
+      throw e;
+    }
+  };
+
   let ctx: any = null;
   try {
-    ctx = await surface.launch({ headless: !HEADED });
-    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    ctx = await launchSurface(`${surface.model} launch`);
+    let page = ctx.pages()[0] ?? (await ctx.newPage());
 
     if (surface.assertReady) {
       // Check the session once, before spending a whole pass discovering it is dead.
-      await surface.assertReady(page);
+      await withTimeout(
+        surface.assertReady(page),
+        READY_TIMEOUT_MS,
+        `${surface.model} session check`
+      );
     }
 
+    let consecutiveTimeouts = 0;
+    let consecutiveFailures = 0;
+    let consecutiveBlocks = 0;
+    let wavePauses = 0;
     for (const question of pending) {
       const ts = new Date().toISOString();
       try {
-        const { text, citations, serpState } = await surface.ask(page, question.text);
+        const { text, citations, serpState } = await withTimeout(
+          surface.ask(page, question.text),
+          ASK_TIMEOUT_MS,
+          `${surface.model} q${question.id}`
+        );
+        consecutiveTimeouts = 0;
+        consecutiveFailures = 0;
+        consecutiveBlocks = 0;
         // Store citations as a URL array, the same shape the API surfaces use, so
         // extract.ts and dashboard.ts need no special case for app rows.
         const urls = citations.map((c) => c.url).filter(Boolean);
@@ -365,6 +494,76 @@ for (const surface of selected) {
         // A dead session or a lost incognito entry point poisons every remaining
         // question in the pass, so stop this surface rather than writing 14 more
         // identical failures.
+        // A block is a measurement condition, not a health condition: the surface
+        // is working and Google is refusing. Keep it out of the grinding count.
+        if (error?.code === "BLOCKED") {
+          consecutiveBlocks++;
+        } else {
+          consecutiveBlocks = 0;
+          consecutiveFailures++;
+        }
+        if (error?.code === "TIMEOUT") {
+          consecutiveTimeouts++;
+          if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+            alerts.push(
+              `${surface.model}: ${consecutiveTimeouts} questions in a row timed out - page stopped responding, pass stopped early, remaining questions unmeasured.`
+            );
+            break;
+          }
+          // The timed-out ask was abandoned, not cancelled - it is still holding
+          // the surface's page, and letting the next question share that page is
+          // how one slow answer becomes a wrong-answer row under the wrong id.
+          // Recycle the whole context so the orphan dies with its connection.
+          try {
+            await ctx?.close().catch(() => {});
+            ctx = await launchSurface(`${surface.model} relaunch after timeout`);
+            page = ctx.pages()[0] ?? (await ctx.newPage());
+            if (surface.assertReady) {
+              await withTimeout(surface.assertReady(page), READY_TIMEOUT_MS, `${surface.model} session re-check`);
+            }
+          } catch (relaunchError: any) {
+            alerts.push(
+              `${surface.model}: relaunch after a timeout failed (${String(relaunchError).slice(0, 120)}) - pass stopped early, remaining questions unmeasured.`
+            );
+            break;
+          }
+        } else {
+          consecutiveTimeouts = 0;
+        }
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          alerts.push(
+            `${surface.model}: ${consecutiveFailures} questions in a row failed - surface is grinding, pass stopped early, remaining questions unmeasured.`
+          );
+          break;
+        }
+        if (consecutiveBlocks >= maxConsecutiveBlocks(pending.length)) {
+          alerts.push(
+            `${surface.model}: ${consecutiveBlocks} questions in a row blocked by Google (${wavePauses} wave pauses) - pass stopped early, remaining questions unmeasured.`
+          );
+          break;
+        }
+        if (
+          error?.code === "BLOCKED" &&
+          consecutiveBlocks % BLOCK_WAVE_TRIGGER === 0 &&
+          wavePauses < BLOCK_WAVE_PAUSES_MS.length
+        ) {
+          const pauseMs = BLOCK_WAVE_PAUSES_MS[wavePauses++];
+          console.log(
+            `  ${consecutiveBlocks} blocks in a row - closing the browser and pausing ${pauseMs / 60_000} min for the wave to pass`
+          );
+          await ctx?.close().catch(() => {});
+          ctx = null;
+          await Bun.sleep(pauseMs);
+          try {
+            ctx = await launchSurface(`${surface.model} relaunch after block pause`);
+            page = ctx.pages()[0] ?? (await ctx.newPage());
+          } catch (relaunchError: any) {
+            alerts.push(
+              `${surface.model}: relaunch after a block pause failed (${String(relaunchError).slice(0, 120)}) - pass stopped early, remaining questions unmeasured.`
+            );
+            break;
+          }
+        }
         if (error?.code === "SESSION_DEAD") {
           alerts.push(`${surface.model}: session is logged out, weekly pass did not run. Re-auth with \`make setup-${surface.model.replace("-app", "")}\`.`);
           break;

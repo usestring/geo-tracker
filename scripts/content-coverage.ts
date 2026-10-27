@@ -15,6 +15,7 @@
 // Writes data/content-coverage.json and prints a summary. Read-only against
 // the site; the only writes are that file. Uses ANTHROPIC_API_KEY from .env.
 import { Database } from "bun:sqlite";
+import { BRAND_SITE, isOwnDomain } from "./brand.ts";
 
 const SITE = process.env.COVERAGE_SITE ?? BRAND_SITE;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -24,6 +25,9 @@ if (!ANTHROPIC_KEY) {
 }
 
 const db = new Database("data/geo.db", { readonly: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 // Judge stability is load-bearing here: the Monday review reports week-over-week
 // movement in these verdicts, so judge noise reads as a content change that

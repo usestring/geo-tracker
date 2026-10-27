@@ -25,6 +25,9 @@ import { BRAND_NAME } from "./brand.ts";
 const DB_PATH = join(import.meta.dir, "..", "data", "geo.db");
 const OUT_PATH = join(import.meta.dir, "..", "data", "visibility-rank.json");
 const db = new Database(DB_PATH, { readonly: true });
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 const BRAND = BRAND_NAME;
 // Mirrors extract.ts - the extraction pass only ever emits competitor names

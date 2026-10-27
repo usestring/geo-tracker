@@ -3,11 +3,11 @@
 // Why this exists: the String-API fetch path snapshots the page at load, but AI
 // Mode streams its answer in afterwards, so 97% of fetch rows came back as
 // shells with zero answer text (measured Aug 10: 435KB of HTML, 546 chars of
-// visible text, no provider names anywhere). The API's `actions` wait path was
-// tried first and hangs indefinitely on google.com URLs specifically (works on
-// example.com) — flagged to eng as product feedback. Until that is fixed, this
-// browser surface owns the measurement, same stability-wait pattern as
-// perplexity-app.mjs.
+// visible text, no provider names anywhere). This browser surface waits for the
+// answer to settle before reading it, the same stability-wait pattern as
+// perplexity-app.mjs. Since Sep 29 2026 the default path reads AI Mode from
+// String's /v1/search instead (see google-search.mjs); this file runs only
+// with GOOGLE_VIA_BROWSER=1.
 //
 // Rows keep the model value 'google-ai-mode' so the trend line continues, and
 // are written with serp_state='answer' so extract.ts skips the envelope parse.
@@ -17,301 +17,133 @@
 //
 // This surface used to call `chromium.launch()`: a local browser on the host machine,
 // no proxy. Every question in a pass hit Google from one residential IP, seconds
-// apart. That produced 11 blocked questions out of 50 on Aug 11, with 8 of the
-// 11 consecutive at the tail — a rate threshold, not headless detection, since
-// the same browser and fingerprint had already answered 39 questions.
-//
-// By that afternoon the IP was blocked outright. Google says so on the page it
-// serves, naming the address:
+// apart. That produced 11 blocked questions out of 50 on Aug 11, and by that
+// afternoon the IP was blocked outright, named on Google's own page:
 //
 //   "Our systems have detected unusual traffic from your computer network."
 //   IP address: 71.105.13.234
 //
-// So the local path is not degraded, it is finished. This connects to String's
-// hosted CDP browser instead, giving each session a rotating residential exit.
-// It also means the tracker dogfoods the Web Access API on the one surface that
-// was bypassing it.
+// So the local path is finished, not degraded. This connects to String's hosted
+// CDP browser instead, giving each session a rotating exit. The session
+// machinery (puppeteer not Playwright, 20-minute recycle, bandwidth filter,
+// dead-page probe, tier rotation) lives in cdp-session.mjs and is shared with
+// google-aio; this file folded onto it on Sep 11, 2026.
 //
-// PUPPETEER, NOT PLAYWRIGHT, and that is not a preference:
-// `chromium.connectOverCDP()` hangs against wss://request.usestring.ai/v1/wss
-// until timeout, reproduced at 60s and at 180s, never completing a single CDP
-// round trip. The endpoint itself is healthy — the socket opens, Browser.getVersion
-// returns Chrome/151.0.7922.108, Target.getTargets lists a page, and
-// Target.setDiscoverTargets fires targetCreated. The likely cause is in that
-// listing: the page target is already `attached: true` when Playwright connects,
-// and Playwright waits on an attachedToTarget event that a pre-attached target
-// never re-emits. `puppeteer.connect()` against the same URL succeeds in 1.2s.
+// ---------------------------------------------------------------------------
+// WARM-UP (Sep 11, 2026) — why every AI Mode request follows a plain SERP
 //
-// This is a real product bug: portal.usestring.ai/docs/browser/playwright tells
-// customers to use playwright-core with connectOverCDP, and that path does not
-// work. Filed for eng.
+// Google scores a cookie-less deep link to udm=50 harder than a plain search
+// from the same address. Measured on fresh premium sessions, Sep 11 evening,
+// round-robin so one block wave could not favour a variant:
 //
-// Session rules from the /wss docs that this file has to respect:
-//   1. Sessions are killed at 30 minutes. The Sunday 200-question pass runs
-//      60-90 minutes, so one session cannot cover it. We recycle at 20.
-//   2. Sessions bill by bandwidth ($10/GB premium, $5/GB standard). A rendered
-//      Google SERP with images is megabytes. We drop images, fonts and media.
-//   3. A blocked question earns one reconnect, because a new session means a new
-//      exit IP. That is the entire point of the change.
+//   direct udm=50                    0 of 3 served
+//   google.com homepage, then udm=50 0 of 3 served
+//   plain /search, then udm=50       served 4 of 4 times the SERP was served
+//                                    (the SERP itself was refused 2 of 6)
 //
-// AI_MODE_LOCAL=1 forces the old local browser. It is for offline debugging
-// only — from this machine Google now blocks it outright.
-import puppeteer from 'puppeteer-core'
-import { chromium } from 'playwright'
-import { pageIsAlive, sleep, DEAD_PAGE_RE } from './cdp-session.mjs'
+// Two paths to the same page, opposite outcomes. A served SERP sets a `DV`
+// cookie with a ten-minute life, and the DB says the same thing from the other
+// side: every clean run since Sep 1 lasted 6.9-11.8 minutes before blocks
+// resumed, on both Google surfaces. So a session is "trusted" for the life of
+// that cookie, and re-scored on its IP when it is gone.
+//
+// askOnce() therefore checks for a live DV cookie and, when there is none,
+// loads a plain SERP for the same question before opening udm=50 in the same
+// tab. On a good session that is one extra page load per ten minutes, not per
+// question. The homepage does not do it: it sets NID and AEC but not DV.
+//
+// The response chain, for whoever debugs the next wave (scripts/diagnostics/
+// block-chain.mjs): a refused search is a 200 interstitial that runs a JS
+// challenge, re-requests with `sei=`, and then 302s to /sorry/index, which is
+// a 429 carrying reCAPTCHA Enterprise. The hosted browser's wire identity is
+// not the trigger — its TLS, HTTP/2 and client-hint fingerprints match real
+// Chrome exactly (scripts/diagnostics/hosted-headers.mjs) — the exit IP and the
+// absence of DV are.
+//
+// ---------------------------------------------------------------------------
+// PROXY TIER — measured twice, opposite results
+//
+// Aug 24: premium 0 of 7, standard 5 of 6 (one request per session, fresh exit
+// each time), so both Google surfaces moved to standard. Sep 11: standard 0 of
+// 24, premium 4 of 6 on the identical request. Neither pool is reliably the
+// good one, so the pool now starts on AI_MODE_PROXY (default standard) and
+// flips tier on every block-triggered reconnect.
+//
+// AI_MODE_LOCAL=1 forces a local browser. Offline debugging only — from this
+// machine Google blocks the home IP outright.
+import {
+  createSessionPool,
+  dismissConsent,
+  sleep,
+  blockedError,
+  DEAD_PAGE_RE,
+  MID_NAVIGATION_RE,
+  SORRY_RE,
+  COLLECT_GOOGLE_SOURCES_SRC,
+  resolveGoogleSources,
+} from './cdp-session.mjs'
 
 const USE_LOCAL = process.env.AI_MODE_LOCAL === '1' || !process.env.STRING_API_KEY
-const SESSION_MAX_MS = Number(process.env.AI_MODE_SESSION_MS ?? 20 * 60 * 1000)
-// ---------------------------------------------------------------------------
-// PROXY TIER (Aug 24, 2026) — why this is 'standard' and not 'premium'
-//
-// On Aug 24 the SERP pass failed 43 of 43 questions, every one a Google traffic
-// challenge. Not a crash and not the detached-frame bug: Google simply refused
-// every request. The Aug 11 hosted-browser move had held at 1 block in 50, so
-// something changed underneath us rather than in this code.
-//
-// Measured the same afternoon, one AI Mode request per session, fresh exit IP
-// each time (probe kept at scripts/probe-google.mjs):
-//
-//   premium  / US   0 of 7 answered   76.86.251.150, 65.30.162.75, 173.189.209.102,
-//                                     24.16.248.156, 108.214.128.241, 98.50.109.94 ...
-//   standard / US   5 of 6 answered   134.199.87.96, 193.46.204.143, 91.92.23.177 ...
-//   premium  / DE   0 of 1 answered
-//   GB       / premium  answered, but behind the EU consent wall
-//
-// Seven different premium exit IPs, seven challenges. So this is not one burned
-// address, it is the whole premium residential pool: Google has flagged the
-// range. The standard pool is a different set of addresses and still answers.
-// The browser fingerprint is not the problem — the same puppeteer build, the
-// same headers and the same page code pass on standard and fail on premium.
-//
-// Standard also bills at $5/GB instead of $10/GB, so this is cheaper, not a
-// trade. Set AI_MODE_PROXY=premium to go back if the pool's reputation recovers.
-//
-// One block still earns one reconnect (see ask() below). At an 83% per-request
-// pass rate that retry puts the surface near 97%, so forcing a fresh session on
-// every question would add connect latency and spend for very little.
-//
-// FOR ENG, not just for the tracker: a customer pointing the premium tier at
-// Google gets a challenge page 100% of the time. That is a product defect.
-// ---------------------------------------------------------------------------
-const PROXY_TIER = process.env.AI_MODE_PROXY ?? 'standard'
-const COUNTRY = process.env.AI_MODE_COUNTRY ?? 'US'
+const PRIMARY_TIER = process.env.AI_MODE_PROXY ?? 'standard'
 
-// Module-level session. `ask()` reads the live page from here rather than the
-// one the runner hands it, because a reconnect replaces the page and the runner
-// holds whatever it was given at launch.
-let session = null
+const pool = createSessionPool({
+  local: USE_LOCAL,
+  sessionMs: Number(process.env.AI_MODE_SESSION_MS ?? 20 * 60 * 1000),
+  proxies: [PRIMARY_TIER, PRIMARY_TIER === 'premium' ? 'standard' : 'premium'],
+  country: process.env.AI_MODE_COUNTRY ?? 'US',
+})
 
-function cdpUrl() {
-  const p = new URLSearchParams({ proxy: PROXY_TIER, countryCode: COUNTRY })
-  return `wss://request.usestring.ai/v1/wss?${p}`
+// A DV cookie this close to expiry is not worth trusting for a 90s answer poll.
+const DV_MIN_LIFE_MS = 60_000
+const WARM_POLL_MS = 1000
+const WARM_MAX_MS = 10_000
+
+/** Is Google's trust cookie from a served SERP still alive in this context? */
+async function hasFreshDv(page) {
+  const cookies = await page.cookies('https://www.google.com')
+  return cookies.some(
+    (c) => c.name === 'DV' && (!(c.expires > 0) || c.expires * 1000 - Date.now() > DV_MIN_LIFE_MS)
+  )
 }
 
-/** Drop bytes we never read. Bandwidth is what the hosted browser bills. */
-const SKIP_TYPES = new Set(['image', 'font', 'media'])
-
-// After this many opens in a row fail, the endpoint is down rather than flaky.
-// Keep going and every remaining question pays the reconnect for the same answer.
-const MAX_CONSECUTIVE_OPEN_FAILURES = 3
-let consecutiveOpenFailures = 0
-
-// ---------------------------------------------------------------------------
-// DEAD PAGES (Aug 24, 2026) — why liveness is checked instead of assumed
-//
-// A Puppeteer page whose main frame has been destroyed still looks like a page.
-// It answers as an object, `isClosed()` stays false, and every call into it
-// throws `Attempted to use detached Frame '<id>'`. Nothing in the session
-// bookkeeping noticed, because `ensureSession` only ever asked how OLD the
-// session was.
-//
-// Measured on the Aug 21 full-bank pass: q61 answered at 17:13:51, one frame
-// detached, and q62 through q200 then failed 126 times in a row on the SAME
-// frame id over the next ten minutes. Two things kept it dead:
-//
-//   1. `ensureSession` returned the cached session on age alone, so a page with
-//      no frame was handed to every following question.
-//   2. The 20-minute recycle did not rescue it. The hosted endpoint gives the
-//      same target back on reconnect, so disconnect-then-connect returned the
-//      identical dead page — which is why one frame id spans the whole window,
-//      including past the 17:18 recycle that was supposed to fix it.
-//
-// So the page is probed before use, and a reconnect that gets the same dead
-// target opens a fresh one instead of trusting `pages()[0]`. The probe
-// (pageIsAlive) and the dead-transport classifier (DEAD_PAGE_RE) live in
-// cdp-session.mjs so both Google surfaces stay on one definition of "dead".
-// ---------------------------------------------------------------------------
-
-const isDeadPage = (e) => DEAD_PAGE_RE.test(String(e?.message ?? e))
-
-async function openSession() {
-  if (USE_LOCAL) {
-    const browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled']
-    })
-    const ctx = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      locale: 'en-US',
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    })
-    await ctx.route('**/*', (route) =>
-      SKIP_TYPES.has(route.request().resourceType()) ? route.abort() : route.continue()
-    )
-    const page = await ctx.newPage()
-    return {
-      close: () => browser.close(),
-      page,
-      freshPage: () => ctx.newPage(),
-      openedAt: Date.now(),
-      remote: false
+/**
+ * Load a plain SERP for the question unless the session already holds a live
+ * DV cookie. Throws BLOCKED on the challenge page; returns 'cached' or 'warmed'.
+ * Not reaching 600 chars inside the window is not a failure — the udm=50
+ * request that follows is the real test.
+ */
+async function warmGoogle(page, question) {
+  if (await hasFreshDv(page)) return 'cached'
+  const url = `https://www.google.com/search?q=${encodeURIComponent(question)}&hl=en&gl=us`
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+  await dismissConsent(page)
+  const deadline = Date.now() + WARM_MAX_MS
+  while (Date.now() < deadline) {
+    await sleep(WARM_POLL_MS)
+    let text
+    try {
+      text = await page.evaluate(() => (document.body.innerText || '').trim())
+    } catch (e) {
+      if (MID_NAVIGATION_RE.test(String(e?.message ?? e))) continue
+      throw e
     }
-  }
-
-  // Same 180s default protocolTimeout trap that wedged google-aio on Aug 17: a
-  // dead hosted session makes every protocol call hang for three minutes instead
-  // of failing. This file still carries its own copy of the session logic; when
-  // it folds onto cdp-session.mjs this constant goes with it.
-  const browser = await puppeteer.connect({
-    browserWSEndpoint: cdpUrl(),
-    headers: { Authorization: `Bearer ${process.env.STRING_API_KEY}` },
-    protocolTimeout: 30_000
-  })
-  // Reconnecting does NOT hand back a clean page — see the DEAD PAGES note
-  // above. Probe the reused target and open a new one when its frame is gone,
-  // otherwise a wedged page survives every recycle meant to replace it. Every
-  // step through interception setup stays inside this guard: a throw after
-  // connect would otherwise leak a live billed websocket until the server's
-  // 30-minute kill. A fresh newPage() only needs the probe when it replaces a
-  // dead target - its own creation just proved the browser answers.
-  try {
-    let page = (await browser.pages())[0] ?? null
-    if (page && !(await pageIsAlive(page))) {
-      await page.close().catch(() => {})
-      page = await browser.newPage()
-      if (!(await pageIsAlive(page))) throw new Error('page has no live frame')
+    if (SORRY_RE.test(text.slice(0, 3000))) {
+      throw blockedError('BLOCKED: Google served a traffic challenge instead of a SERP (warm-up)')
     }
-    if (!page) page = await browser.newPage()
-    await page.setViewport({ width: 1280, height: 900 })
-    await page.setRequestInterception(true)
-    page.on('request', (req) => {
-      if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
-      else req.continue().catch(() => {})
-    })
-    return {
-      close: () => browser.disconnect(),
-      page,
-      freshPage: async () => {
-        const fresh = await browser.newPage()
-        await fresh.setViewport({ width: 1280, height: 900 })
-        await fresh.setRequestInterception(true)
-        fresh.on('request', (req) => {
-          if (SKIP_TYPES.has(req.resourceType())) req.abort().catch(() => {})
-          else req.continue().catch(() => {})
-        })
-        return fresh
-      },
-      openedAt: Date.now(),
-      remote: true
-    }
-  } catch (e) {
-    await Promise.resolve(browser.disconnect()).catch(() => {})
-    throw new Error(`hosted browser accepted the socket but did not answer: ${e?.message ?? e}`)
+    if (text.length > 600) return 'warmed'
   }
-}
-
-async function closeSession() {
-  const s = session
-  session = null
-  if (s) await Promise.resolve(s.close()).catch(() => {})
-}
-
-/** Open a session, or replace one that is stale, dead, or has just been blocked. */
-async function ensureSession({ force = false } = {}) {
-  const stale = !session || Date.now() - session.openedAt >= SESSION_MAX_MS
-  // Age is not health. A session inside its 20 minutes can still be holding a
-  // page whose frame died, which is exactly what burned 126 questions on Aug 21.
-  if (session && !force && !stale && (await pageIsAlive(session.page))) return session
-  if (session) {
-    console.log(
-      force
-        ? '  reconnecting for a fresh exit IP'
-        : stale
-          ? '  session past its recycle age, reconnecting'
-          : '  page lost its frame, reconnecting'
-    )
-  }
-  await closeSession()
-
-  // Back off between reconnects. A hosted browser that just dropped us is often
-  // still tearing the old session down, and reconnecting into that window is how
-  // the wedged state gets reached in the first place.
-  if (consecutiveOpenFailures > 0) {
-    await sleep(Math.min(2000 * 2 ** (consecutiveOpenFailures - 1), 15_000))
-  }
-
-  try {
-    session = await openSession()
-    consecutiveOpenFailures = 0
-  } catch (e) {
-    consecutiveOpenFailures += 1
-    if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
-      const err = new Error(
-        `hosted browser unreachable after ${consecutiveOpenFailures} attempts: ${e?.message ?? e}`
-      )
-      err.code = 'SESSION_POOL_DEAD'
-      throw err
-    }
-    throw e
-  }
-  return session
-}
-
-export async function launch() {
-  await closeSession()
-  session = await openSession()
-  // The runner wants something context-shaped. Hand back a shim rather than the
-  // live object: a reconnect swaps the real one out, and the runner would
-  // otherwise keep driving a closed session.
-  return {
-    pages: () => [session?.page].filter(Boolean),
-    newPage: async () => (await ensureSession()).page,
-    on: () => {},
-    close: () => closeSession()
-  }
-}
-
-// Click a consent button by visible text. Written with page.evaluate so the one
-// implementation works on both Puppeteer and Playwright — their locator APIs
-// differ, but evaluate does not.
-async function dismissConsent(page) {
-  // US exits rarely see the consent wall, but a non-US proxy or a Google
-  // experiment can surface it. Accept-all keeps the page consistent with what a
-  // normal buyer sees.
-  const clicked = await page.evaluate(() => {
-    const wanted = /^(accept all|i agree|accept)$/i
-    for (const el of document.querySelectorAll('button, [role="button"], input[type="submit"]')) {
-      const label = (el.innerText || el.value || '').trim()
-      if (wanted.test(label)) {
-        el.click()
-        return true
-      }
-    }
-    return false
-  })
-  if (clicked) await sleep(1500)
+  return 'warmed'
 }
 
 /**
  * One attempt. Throws with code 'BLOCKED' on a traffic challenge or an empty
  * answer, which is what ask() retries on.
  *
- * The runner's `page` argument is deliberately unused — see the note on
- * `session` above.
+ * The runner's `page` argument is deliberately unused — a reconnect replaces
+ * the page, and the runner holds whatever it was given at launch.
  */
 async function askOnce(question, timeoutMs) {
-  const s = await ensureSession()
+  const s = await pool.ensure()
   // ONE TAB PER QUESTION (Aug 24, 2026).
   //
   // AI Mode is a conversation, not a search page. Driving question after
@@ -333,6 +165,12 @@ async function askOnce(question, timeoutMs) {
   // google-aio does NOT need this. It was clean on the same pass, 0 of 12.
   const page = await s.freshPage()
   try {
+  // Cookies are per context, so the warm-up's DV carries into this tab and
+  // into every later tab on the session — see WARM-UP above.
+  if ((await warmGoogle(page, question)) === 'warmed') {
+    console.log(`  warmed the session with a plain SERP (${pool.tier()})`)
+  }
+
   const url = `https://www.google.com/search?q=${encodeURIComponent(question)}&udm=50&hl=en&gl=us`
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   await dismissConsent(page)
@@ -344,11 +182,15 @@ async function askOnce(question, timeoutMs) {
     stableFor = 0
   while (Date.now() < deadline) {
     await sleep(1500)
-    const text = await page.evaluate(() => (document.body.innerText || '').trim())
-    if (/unusual traffic|not a robot|recaptcha/i.test(text.slice(0, 3000))) {
-      const err = new Error('BLOCKED: Google served a traffic challenge instead of AI Mode')
-      err.code = 'BLOCKED'
-      throw err
+    let text
+    try {
+      text = await page.evaluate(() => (document.body.innerText || '').trim())
+    } catch (e) {
+      if (MID_NAVIGATION_RE.test(String(e?.message ?? e))) continue
+      throw e
+    }
+    if (SORRY_RE.test(text.slice(0, 3000))) {
+      throw blockedError('BLOCKED: Google served a traffic challenge instead of AI Mode')
     }
     if (text === last && text.length > 600) stableFor += 1500
     else {
@@ -362,67 +204,91 @@ async function askOnce(question, timeoutMs) {
   const cut = last.indexOf(question.slice(0, 40))
   const answerText = (cut > 0 ? last.slice(cut) : last).trim()
   if (answerText.length < 300) {
-    const err = new Error('EMPTY: AI Mode rendered no answer (page text under 300 chars after wait)')
-    err.code = 'BLOCKED'
-    throw err
+    throw blockedError('EMPTY: AI Mode rendered no answer (page text under 300 chars after wait)')
   }
 
   // Citations: outbound links only. Google wraps some in /url?q= redirects —
   // unwrap those so the ledger sees real domains.
   //
-  // KNOWN IMPRECISION: this reads every anchor on the page, not just the ones
-  // inside the answer's source list. On a udm=50 page most links are answer
-  // sources, so the count is close, but it is a slight ceiling rather than a
-  // floor. Scoping this to the source container is the open improvement.
-  // (It is NOT an undercount — that claim was measured false on Aug 11: AI Mode
-  // returns a mean of 21.6 citations, the best yield of any surface we run.)
-  const citations = await page.evaluate(() => {
-    const out = new Map()
-    document.querySelectorAll('a[href]').forEach((a) => {
-      let href = a.href
-      if (href.startsWith('https://www.google.com/url?')) {
-        const q = new URL(href).searchParams.get('q') || new URL(href).searchParams.get('url')
-        if (q) href = q
-      }
-      if (!/^https?:\/\//.test(href)) return
-      const host = new URL(href).hostname
-      if (
-        /(^|\.)google\.(com|[a-z]{2})$/.test(host) ||
-        host === 'accounts.google.com' ||
-        host === 'support.google.com' ||
-        host === 'policies.google.com' ||
-        host === 'maps.google.com'
-      )
-        return
-      if (!out.has(href)) out.set(href, { url: href, title: (a.textContent || '').trim().slice(0, 200) })
-    })
-    return [...out.values()]
-  })
+  // KNOWN IMPRECISION: page-wide anchor extraction reads every link on the
+  // page, not just the ones inside the answer. On a udm=50 page most links are
+  // answer sources, so the count is close, but it is a ceiling rather than a
+  // floor. (It is NOT an undercount — that claim was measured false on Aug 11:
+  // AI Mode returns a mean of 21.6 citations, the best yield of any surface.)
+  //
+  // SCOPING (Aug 29, 2026), default OFF. AI_MODE_SCOPE_CITATIONS=1 restricts
+  // extraction to anchors that appear after the query echo in document order,
+  // which is the same boundary the answer text already uses via `cut` above.
+  // Everything before that point is SERP chrome: nav, tabs, account links.
+  //
+  // It defaults off because this surface is the highest-yield one we run and a
+  // wrong selector silently zeroes it. Both counts are returned on every run
+  // (citationsPageWide, citationsScoped) whatever the flag says, so a single
+  // live pass measures the real delta and flipping the default becomes a
+  // decision with data behind it rather than a guess. Turn it on only once the
+  // scoped count is confirmed non-zero and lower than the page-wide count.
+  //
+  // The extractor is collectGoogleSources in cdp-session.mjs, shared with
+  // google-aio and driven against a synthetic DOM by tests/ai-mode-citations.
+  const SCOPE_CITATIONS = process.env.AI_MODE_SCOPE_CITATIONS === '1'
+  const extracted = await page.evaluate(
+    `(${COLLECT_GOOGLE_SOURCES_SRC})(document, ${JSON.stringify(question.slice(0, 40))})`
+  )
 
-  return { text: answerText.slice(0, 24000), citations }
+  // Never let scoping return an empty list when the page-wide read found links:
+  // an empty scoped result means the boundary heuristic missed, not that the
+  // answer had no sources.
+  const useScoped = SCOPE_CITATIONS && extracted.boundaryFound && extracted.scoped.length > 0
+  // The folded "(+N)" sources: resolve their /goto tokens to page URLs.
+  const { citations } = await resolveGoogleSources(
+    useScoped ? extracted.scoped : extracted.pageWide,
+    (useScoped ? extracted.gotos?.scoped : extracted.gotos?.pageWide) ?? []
+  )
+
+  return {
+    text: answerText.slice(0, 24000),
+    citations,
+    citationsPageWide: extracted.pageWide.length,
+    citationsScoped: extracted.scoped.length,
+    citationScopeApplied: useScoped
+  }
   } finally {
     await page.close().catch(() => {})
   }
 }
 
+export async function launch() {
+  await pool.close()
+  await pool.ensure()
+  // The runner wants something context-shaped. The shim reads the live session
+  // on every call, so a reconnect underneath it is invisible to the runner.
+  return pool.shim()
+}
+
+// Three attempts: the current tier, then one on each tier after a block flips
+// it. A challenge is tied to the exit IP far more often than to the query, so
+// a fresh session is a real second chance rather than a repeat of the same
+// request. Some queries (defeating CAPTCHA, defeating Cloudflare) are refused
+// from any address; three attempts bounds what those can spend, at ~5s and
+// ~50KB per blocked attempt.
+//
+// A detached frame is not a second chance, it is the only chance: the page
+// never heals, so without a retry the rest of the pass fails on the same id.
+// It keeps the tier — the exit IP was not the problem.
+const MAX_ATTEMPTS = 3
+
 export async function ask(page, question, { timeoutMs = 90_000 } = {}) {
-  try {
-    return await askOnce(question, timeoutMs)
-  } catch (e) {
-    const dead = isDeadPage(e)
-    if ((e.code !== 'BLOCKED' && !dead) || USE_LOCAL) throw e
-    // A challenge is tied to the exit IP far more often than to the query, so a
-    // fresh session is a real second chance rather than a repeat of the same
-    // request. Exactly one retry: three of the Aug 11 failures were content
-    // triggered (queries about defeating CAPTCHA and Cloudflare) and those fail
-    // from any address. Retrying them harder only spends bandwidth.
-    //
-    // A detached frame is not a second chance, it is the only chance: the page
-    // never heals, so without this the rest of the pass fails on the same id.
-    console.log(
-      `  ${dead ? 'page died' : 'blocked'}, retrying on a fresh session: ${question.slice(0, 60)}`
-    )
-    await ensureSession({ force: true })
-    return await askOnce(question, timeoutMs)
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await askOnce(question, timeoutMs)
+    } catch (e) {
+      const blocked = e.code === 'BLOCKED'
+      const dead = DEAD_PAGE_RE.test(String(e?.message ?? e))
+      if ((!blocked && !dead) || USE_LOCAL || attempt >= MAX_ATTEMPTS) throw e
+      console.log(
+        `  ${dead ? 'page died' : 'blocked'}, retrying on a fresh session (${attempt}/${MAX_ATTEMPTS}): ${question.slice(0, 60)}`
+      )
+      await pool.ensure({ force: true, rotate: blocked })
+    }
   }
 }

@@ -36,7 +36,7 @@ Everything else here is plumbing. The bank decides whether you learn anything, a
 
 **Recorded sales calls.** Every call recording is a transcript of a buyer describing their problem in their own words, before they knew our vocabulary. One pass over those transcripts pulls out what people asked before they found us, the words they use for the problem, and the objections. This is the highest-provenance source we have, and almost nobody mines it.
 
-**Search data.** Google Search Console shows which queries already surface you, including the long tail you never targeted. `make gsc` pulls queries, pages, and index coverage.
+**Search data.** Google Search Console shows which queries already surface you, including the long tail you never targeted. `make gsc` pulls queries, pages, query x page, and index coverage. `make search-feedback` turns the newest pull into action lists (see below).
 
 **What competitors publish.** Rivals do keyword research too, and their content calendar is public. `make competitors` diffs each competitor's sitemap against the stored URL set and summarises what is new, so you see what they think wins next before that page has earned a single citation.
 
@@ -52,7 +52,7 @@ Nine surfaces, because they disagree with each other and the disagreement is the
 
 Four engine APIs, each with web search or grounding on: `gpt` (OpenAI Responses with `web_search`), `claude` (Anthropic Messages with the web search tool), `perplexity` (Sonar), and `gemini` (with `google_search` grounding).
 
-Two Google surfaces driven through a headless browser: `google-ai-mode` (the `udm=50` AI Mode SERP) and `google-aio` (the AI Overview block on a normal SERP).
+Two Google surfaces: `google-ai-mode` (AI Mode) and `google-aio` (the AI Overview on a normal results page). By default both read String's search endpoint; a hosted-browser path stays behind `GOOGLE_VIA_BROWSER=1`. See [The Google surfaces](#the-google-surfaces) below.
 
 Three consumer apps driven through a logged-in browser profile, weekly, on a 15-question sample: `chatgpt-app`, `claude-app`, and `perplexity-app`.
 
@@ -82,7 +82,15 @@ Seven more measurements sit on top of the same data, each behind its own make ta
 
 `make weekly-measure` runs all five, each step allowed to fail alone.
 
-Two more read the GSC pulls instead of the answer data. `make opportunity` ranks pages by the clicks a fix would earn - a recover / CTR / rank lever per page, plus near-miss queries - as an ordering, not a forecast. `make edit-enroll URL=... NOTE=...` snapshots a page the day an edit ships; `make edit-read` takes the +28d and +56d readings when due, reporting the control-adjusted lift against the rest of the site, so a rising tide reads as zero. And `make daily-report` renders a one-page daily HTML report: run health per surface, today's mention rate against the 7-day average, and a banner for any surface that produced zero clean rows.
+Three more read the GSC pulls instead of the answer data. `make opportunity` ranks pages by the clicks a fix would earn - a recover / CTR / rank lever per page, plus near-miss queries - as an ordering, not a forecast. `make edit-enroll URL=... NOTE=...` snapshots a page the day an edit ships; `make edit-read` takes the +28d and +56d readings when due, reporting the control-adjusted lift against the rest of the site, so a rising tide reads as zero. `make search-feedback` writes `data/search-feedback.json` with six lists: pages with real impressions and a low click rate, non-branded queries at positions 8 to 20, pages that lost 30% or more against a pull at least 7 days older, new non-branded queries not in your bank, queries split across two of your pages or served by the homepage, and pages that still earn impressions but no longer return 2xx/3xx. `make gsc-daily` pulls into `data/gsc/daily/` so the weekly scripts keep comparing week over week. Set `SEARCH_BRANDED_TERMS` and `SEARCH_CATEGORY_TERMS` in `.env` to tune what counts as branded and as a category query. And `make daily-report` renders a one-page daily HTML report: run health per surface, today's mention rate against the 7-day average, and a banner for any surface that produced zero clean rows.
+
+### What to write next
+
+Two rankings turn the data into a writing order.
+
+`make competitor-posts` ranks the competitor and affiliate pages the engines cite, and how often the citing answer also names the competitor who wrote the page. It groups pages by the search intent their slug answers and matches each intent to your own page: live (in your sitemap), drafted or queued (a row in the optional `CONTENT_QUEUE_PATH` table), or none. A topic leads when it ranks high on citations or on mentions. The dashboard shows it as a card at the top, and `make dashboard` runs it first.
+
+`make daily-picks` ranks the bank questions you are losing: lost answers in the last 14 days, times the `prio:` weight, times the content-coverage verdict. Questions that resolve to the same page are summed into one pick, and each pick carries an action: new page, refresh, draft a queued row, or a waiting state. It needs `make content-coverage` first. It reads page ownership from the content queue, `bankIds` front matter in `CONTENT_DIR` and `DRAFTS_DIR`, and pages of yours the engines cited.
 
 ## The bug worth knowing about
 
@@ -90,7 +98,7 @@ For a week our Google AI Overview collector reported a mean of 0.0 citations and
 
 The collector was fetching the page and parsing the HTML. Google streams the AI answer in after load, and writes the literal string "An AI Overview is not available for this search" into the pre-generation HTML. Our parser read that correctly and scored a real negative on it. Probed over CDP, the overview container is absent at 1 second and present at 9.
 
-The parser was not the problem. Reading the page that early was. Both Google surfaces now drive a real browser and wait for the answer to settle or for a 30 second deadline to expire. Questions with no overview cost the full timeout, which is deliberate: a fast false negative is the exact bug being fixed.
+The parser was not the problem. Reading the page that early was. Both Google surfaces then moved to a real browser that waits for the answer to settle or for a 30 second deadline to expire. (They now read a search endpoint by default; see the next section. The lesson holds for any source.) Questions with no overview cost the full timeout, which is deliberate: a fast false negative is the exact bug being fixed.
 
 If you build something like this yourself, that is the failure mode to plan for. A collector that reports zero looks identical to a collector that is working and finding nothing.
 
@@ -100,7 +108,20 @@ Second failure mode, same shape. Gemini lost 42% of its rows for three days, and
 
 The fix has three parts. Pin a concrete model. Keep an ordered fallback list for demand spikes (`GEMINI_MODELS` in `.env`), and verify every fallback actually grounds first: `gemini-3.1-flash-lite` returns HTTP 200 with zero grounding chunks, which would score as "Gemini cited nothing", a false zero instead of a visible outage. And record which model answered in `runs.model_id`, so a swap shows up in the data while the `model` column keeps the surface name and the trend lines intact.
 
-## Why the Google surfaces need clean egress
+## The Google surfaces
+
+Both Google surfaces read String's search endpoint by default: `POST https://request.usestring.ai/v1/search` with `STRING_API_KEY`.
+
+- `google-ai-mode` sends `engine: "google_ai_mode"` and reads `aiMode.text` and `aiMode.sources`. AI Mode always writes an answer, so an empty one is stored as an error row, not as a zero-citation answer.
+- `google-aio` sends `engine: "google"` with `aiOverview: true` and reads `overviews[].text` and `overviews[].sources`. Without `aiOverview`, an overview that Google streams in comes back as declined with no text, and about two thirds of overviews stream.
+- Every request asks for country `US` and language `en`. A missing overview or an answer with zero sources is re-asked up to twice, and the richest read is kept. On our core questions a second ask often returned sources that the first did not.
+- Source URLs come back as real page URLs, and hostnames that are not valid are dropped.
+
+We moved to the endpoint because the browser path spent every morning on Google's traffic challenge. On the last day of the browser path the core pass answered 32 of 58 (AI Mode) and 43 of 58 (AI Overview). The same day, the endpoint answered 58 of 58 on both surfaces with zero errors. AI Overview presence matched the browser on all 43 questions the browser answered, so the switch lost no overviews. `scripts/diagnostics/search-compare.mjs` asks the same questions through the endpoint and prints each next to the browser row stored for a date, so you can check presence and citation counts against your own data.
+
+`GOOGLE_VIA_BROWSER=1` puts the hosted-browser path back. The rest of this section is about that path.
+
+### Why the browser path needs clean egress
 
 Same story, second half. Running the Google surfaces from an office IP got us rate-limited by name on Google's block page. Failures ran at 11 in 50.
 
@@ -108,25 +129,31 @@ Both Google surfaces now connect to a remote Chrome over CDP with rotating resid
 
 You need a key for this, and you can skip it. The four engine APIs need nothing from us, and the tracker runs fine without the two Google surfaces. Any CDP endpoint with residential egress works; `scripts/surfaces/cdp-session.mjs` is about twenty lines of connection setup. We use ours because we built it and it is what we had.
 
-One note if you go this route: `chromium.connectOverCDP()` from Playwright hangs against our endpoint while `puppeteer.connect()` succeeds in 1.2 seconds. That is a bug on our side, filed. The surfaces use puppeteer-core because of it.
+The surfaces connect with puppeteer-core, which opens a session in about 1.2 seconds.
 
-Expect the egress itself to go stale, and instrument for it. On one run every single question came back a Google traffic challenge, 43 for 43, after weeks at roughly one block in fifty. Nothing in the code had changed. `scripts/probe-google.mjs` sends one request per egress config and prints the exit IP next to what Google served, which separates the two causes that look identical from the outside: a burned IP pool, or a browser fingerprint Google has learned. It measured the premium residential pool at 0 of 7 with a different exit address every time, and the cheaper standard pool at 5 of 6 on the same code. So the pool's reputation was the problem and the fingerprint was fine. Both surfaces now default to the standard tier and the pass recovered the same afternoon.
+Expect the egress itself to go stale, and instrument for it. On one run every single question came back a Google traffic challenge, 43 for 43, after weeks at roughly one block in fifty. Nothing in the code had changed. `scripts/probe-google.mjs` sends one request per egress config and prints the exit IP next to what Google served, which separates the two causes that look identical from the outside: a burned IP pool, or a browser fingerprint Google has learned. It measured the premium residential pool at 0 of 7 with a different exit address every time, and the cheaper standard pool at 5 of 6 on the same code. So the pool's reputation was the problem and the fingerprint was fine. Both surfaces moved to the standard tier and the pass recovered the same afternoon. Three weeks later the result reversed: standard 0 of 24, premium 4 of 6. Neither pool is reliably the good one, so both surfaces now start on standard (`AI_MODE_PROXY`, `GOOGLE_AIO_PROXY`) and flip tier on every block-triggered reconnect. The default `/v1/search` path has none of this to manage: it answered 58 of 58 on its first day, and every core pass since has come back clean.
 
 The general lesson is worth more than the specific tier. A residential pool is shared, so its reputation is not yours alone, and a pool that works today can be flagged tomorrow because of what somebody else did with it. Run the probe before you debug anything else.
 
 And assume the socket opening proves nothing. On one run the endpoint accepted the websocket while the browser behind it was already gone, so the first protocol call hung for puppeteer's default 180-second timeout, and 26 of 50 questions burned three minutes each to learn the same fact. The session layer now makes a real protocol call before handing a session back, runs a 30-second protocol timeout, and stops the pass after three consecutive dead opens. A wedged endpoint should fail in seconds, once.
 
-Run them with `make serp-core` for the daily subset or `make serp` for the full bank. Both resume, so a re-run only retries what failed. `bun scripts/probe-google.mjs` is the first thing to reach for when they start coming back blocked.
+Blocks come in waves that last minutes, not hours. On the browser path the runner keeps three separate breakers: three timeouts in a row, eight non-block failures in a row, and a block limit that scales with the pass (12.5% of the questions, never under 25). After eight blocks in a row it closes the browser, waits 3, then 6, then 12 minutes, and relaunches. The surfaces also rotate proxy tiers on a block and warm an AI Mode session through a plain results page first.
+
+Google folds some sources behind `/goto` tokens. The browser path resolves each token with one cookie-less GET that reads the redirect `Location` and never loads the page, so folded sources count as pages. `GOOGLE_RESOLVE_GOTO=0` turns it off.
+
+Run either path with `make serp-core` for the daily subset or `make serp` for the full bank. Both resume, so a re-run only retries what failed. Both surfaces always run, even when the first one raises an alert. `bun scripts/probe-google.mjs` is the first thing to reach for when the browser path starts coming back blocked; it now takes repeated samples per egress config.
 
 ## Tests
 
-`make test` runs in about thirty seconds and spends no network and no browser credits. It fakes the hosted browser and reproduces the dead-page condition described above, which is the failure that cost us 126 questions in one pass.
+`make test` runs in about a minute and spends no network and no browser credits. It fakes the hosted browser and reproduces the dead-page condition described above, which is the failure that cost us 126 questions in one pass. It also pins the Google source collector and `/goto` resolution against synthetic pages, and the competitor-post ranking rules.
 
 ## Storage
 
 SQLite, five tables.
 
 `questions` is the bank. `runs` holds one row per question per surface per day, with the raw answer text, the citation list, and the concrete model that answered (`model_id`), and failures stored as rows rather than dropped. `mentions` holds the extraction pass output. `domains` is the citation ledger with a classification per domain. `competitor_pages` holds the URL set behind the sitemap diff.
+
+Every script that opens the database sets `PRAGMA busy_timeout = 30000`, so a tracker pass that overlaps `make extract` or a review run waits for the lock instead of failing with `SQLITE_BUSY`.
 
 Extraction is two model passes over the stored answers. Haiku decides whether you were mentioned, at what rank, and with what sentiment. Sonnet classifies any newly seen citation domain. Both are idempotent, so re-running costs nothing on rows already done.
 
@@ -160,7 +187,7 @@ The general point: when a scraper's output is a count, zero is a value your code
 
 ## Known gaps
 
-`google-ai-mode` counts citations from every link on the page, filtered only for Google's own domains, so its numbers are a slight ceiling rather than a floor. `google-aio` scopes to the AI Overview container and does not share the flaw. Scoping AI Mode the same way is the open follow-up.
+On the browser path, `google-ai-mode` counts citations from every link on the page by default, filtered only for Google's own domains, so its numbers are a slight ceiling rather than a floor. `AI_MODE_SCOPE_CITATIONS=1` reads only the links after the query echo. Every run stores both counts, so compare them on your own data before you turn it on. The search-endpoint path does not have this problem: it returns the source list directly.
 
 Scheduling is not in this repo. We run it from a scheduled task; cron is fine.
 

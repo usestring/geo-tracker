@@ -21,18 +21,22 @@ run-core:
 retry:
 	bun scripts/run-daily.ts --failed-today
 
-# --- Google surfaces (hosted CDP browser, logged out) -----------------------
-# Google streams its AI answer in after page load, so neither surface can be
-# measured with a fetch snapshot. Both drive a real browser and wait for the
-# answer to settle. Same daily/weekly split as the engine APIs; both resume,
-# so a re-run only retries failures.
+# --- Google surfaces (AI Mode + AI Overviews) -------------------------------
+# Both surfaces read String's search endpoint (POST /v1/search, STRING_API_KEY)
+# by default. GOOGLE_VIA_BROWSER=1 puts back the hosted-browser path, which
+# waits for the streamed answer to settle in a real browser. Same daily/weekly
+# split as the engine APIs; both resume, so a re-run only retries failures.
+#
+# Both surfaces always run. run-apps exits 2 when a surface alerts, and
+# without the leading `-` make would stop after google-ai-mode and never ask
+# google-aio. Read the ALERT lines in the output, not the exit code.
 serp-core:
-	bun scripts/run-apps.ts --only=google-ai-mode --core
-	bun scripts/run-apps.ts --only=google-aio --core
+	-bun scripts/run-apps.ts --only=google-ai-mode --core
+	-bun scripts/run-apps.ts --only=google-aio --core
 
 serp:
-	bun scripts/run-apps.ts --only=google-ai-mode
-	bun scripts/run-apps.ts --only=google-aio
+	-bun scripts/run-apps.ts --only=google-ai-mode
+	-bun scripts/run-apps.ts --only=google-aio
 
 # --- tests ------------------------------------------------------------------
 # Fakes the hosted browser, so no network and no browser credits are spent.
@@ -81,7 +85,20 @@ check-claude:
 extract:
 	bun scripts/extract.ts
 
+# One ranked list of what to write next, across every kind (new page,
+# refresh, queued row): lost answers x prio x coverage verdict, summed per
+# page. Needs `make content-coverage` first. Writes data/daily-picks.json.
+daily-picks:
+	bun scripts/daily-picks.ts
+
+# Competitor posts the engines cite and mention most, grouped by search intent
+# and matched to your own page (data/competitor-posts.json). The dashboard's
+# priority and "copy this" cards read it. The sitemap fetch tolerates failure.
+competitor-posts:
+	bun scripts/competitor-posts.ts
+
 dashboard:
+	-bun scripts/competitor-posts.ts
 	bun scripts/dashboard.ts
 
 # --- measurement pack (rank / routing / objections / sentiment / robots) ----
@@ -144,14 +161,29 @@ competitors:
 
 # --- Google Search Console (optional) ---------------------------------------
 # gsc-auth  one-time browser consent (needs GSC_CLIENT_ID/SECRET in .env)
-# gsc       queries + pages + index coverage, CSVs into data/gsc/
+# gsc       queries + pages + query x page + index coverage, CSVs into data/gsc/
 gsc-auth:
 	bun scripts/gsc.ts auth
 
 gsc:
 	bun scripts/gsc.ts queries
 	bun scripts/gsc.ts pages
+	bun scripts/gsc.ts query-pages
 	bun scripts/gsc.ts coverage
+
+# Daily GSC pull for the search feedback loop. Writes to data/gsc/daily/ so
+# the weekly scripts' latest-vs-second-latest diffs stay week over week. No
+# coverage sweep: that stays weekly.
+gsc-daily:
+	bun scripts/gsc.ts queries --daily
+	bun scripts/gsc.ts pages --daily
+	bun scripts/gsc.ts query-pages --daily
+
+# Six action lists from the newest pull -> data/search-feedback.json: low CTR,
+# near page 1, losing, new queries, wrong intent, and dead pages that still
+# earn impressions. Set SEARCH_BRANDED_TERMS / SEARCH_CATEGORY_TERMS in .env.
+search-feedback:
+	bun scripts/search-feedback.ts
 
 # Rank pages by the clicks a fix would earn - a recover / ctr / rank lever per
 # page against a soft CTR curve, plus near-miss queries. Needs `make gsc`
@@ -182,4 +214,5 @@ backup:
         setup-chatgpt setup-claude check-chatgpt check-claude extract dashboard \
         content-coverage competitors gsc-auth gsc backup test \
         rank routing objections sentiment robots-audit weekly-measure daily-report \
-        opportunity edit-enroll edit-read edit-report
+        opportunity edit-enroll edit-read edit-report \
+        gsc-daily search-feedback competitor-posts daily-picks

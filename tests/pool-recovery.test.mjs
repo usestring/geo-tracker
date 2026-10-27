@@ -18,6 +18,7 @@ function makePage() {
     close: async () => { closed = true; },
     setViewport: async () => {},
     setRequestInterception: async () => {},
+    cookies: async () => [],
     on: () => {},
     evaluate: async () => {
       if (p === dead) throw new Error(`Attempted to use detached Frame '${id}'.`);

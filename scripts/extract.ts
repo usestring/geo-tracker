@@ -89,6 +89,9 @@ function parseJsonSalvaging(text: string): Record<string, string> {
 }
 
 const db = new Database(DB_PATH);
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 
 // --- 0. migrations (idempotent) ----------------------------------------------
 
@@ -383,6 +386,22 @@ const CLASSIFY_SYSTEM = `You classify web domains for an AEO citation ledger in 
 - "forum": community content (Reddit, Stack Overflow, HN, Quora)
 - "docs": official documentation of a non-competitor product or standard
 Reply with ONLY a JSON object mapping each domain to its classification.`;
+
+// A hostname with no letters, or a label that is empty, is a broken URL that
+// reached the ledger (e.g. "https://.../" from a malformed source). Sent alone
+// it made the classifier reply that no list was given, and the batch failed
+// every run, so it is dropped here instead of classified.
+const VALID_HOST = /^(?=.*[a-z])[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
+const dropped = db
+  .query("SELECT domain FROM domains WHERE classification = 'unclassified'")
+  .all()
+  .map((d: any) => d.domain as string)
+  .filter((d) => !VALID_HOST.test(d));
+if (dropped.length) {
+  const del = db.prepare("DELETE FROM domains WHERE domain = ?");
+  for (const d of dropped) del.run(d);
+  console.log(`domains: dropped ${dropped.length} invalid hostname(s): ${dropped.slice(0, 5).join(", ")}`);
+}
 
 const newDomains = (
   db

@@ -3,7 +3,13 @@
 //   bun scripts/gsc.ts auth              one-time browser consent, saves the token
 //   bun scripts/gsc.ts queries [--days=28]   search queries -> data/gsc/queries-YYYYMMDD.csv
 //   bun scripts/gsc.ts pages   [--days=28]   page performance -> data/gsc/pages-YYYYMMDD.csv
+//   bun scripts/gsc.ts query-pages [--days=28]  query x page -> data/gsc/query-pages-YYYYMMDD.csv
 //   bun scripts/gsc.ts coverage              URL-inspect every sitemap URL -> data/gsc/coverage-YYYYMMDD.csv
+//
+// --daily writes to data/gsc/daily/ instead. The weekly scripts
+// (opportunity.ts compares the latest pull with the second-latest) read only the
+// top folder, so a daily pull there would turn their week-over-week numbers into
+// day-over-day ones. search-feedback.ts reads the daily folder.
 //
 // Setup (once): create an OAuth client of type "Desktop app" in any GCP project
 // (APIs & Services -> Credentials -> Create credentials -> OAuth client ID; enable
@@ -25,7 +31,7 @@ const PROPERTY = process.env.GSC_PROPERTY || `sc-domain:${BRAND_DOMAIN}`;
 // Both sitemaps: the marketing site and the docs. sc-domain covers every subdomain.
 const SITEMAP_URLS = (process.env.GSC_SITEMAPS || `${BRAND_SITE}/sitemap.xml`).split(",");
 const TOKEN_PATH = join(import.meta.dir, "..", "profiles", "gsc-token.json");
-const OUT_DIR = join(import.meta.dir, "..", "data", "gsc");
+const OUT_DIR = join(import.meta.dir, "..", "data", "gsc", ...(process.argv.includes("--daily") ? ["daily"] : []));
 const SCOPE = "https://www.googleapis.com/auth/webmasters";
 
 const argOf = (name: string) => process.argv.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
@@ -100,7 +106,7 @@ const stamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, "");
 const csvCell = (v: unknown) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 
 // --- queries / pages: Search Analytics ---------------------------------------
-async function searchAnalytics(dimension: "query" | "page") {
+async function searchAnalytics(dimension: "query" | "page" | "query-page") {
   const token = await accessToken();
   const end = new Date(); end.setDate(end.getDate() - 1); // GSC data lags ~1 day
   const start = new Date(end); start.setDate(start.getDate() - DAYS);
@@ -110,16 +116,17 @@ async function searchAnalytics(dimension: "query" | "page") {
     {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ startDate: fmt(start), endDate: fmt(end), dimensions: [dimension], rowLimit: 5000 }),
+      body: JSON.stringify({ startDate: fmt(start), endDate: fmt(end), dimensions: dimension === "query-page" ? ["query", "page"] : [dimension], rowLimit: dimension === "query-page" ? 25000 : 5000 }),
     }
   );
   if (!res.ok) { console.error(`searchAnalytics ${res.status}: ${await res.text()}`); process.exit(1); }
   const rows = ((await res.json()) as any).rows ?? [];
 
   mkdirSync(OUT_DIR, { recursive: true });
-  const out = join(OUT_DIR, `${dimension === "query" ? "queries" : "pages"}-${stamp()}.csv`);
-  const lines = [`${dimension},clicks,impressions,ctr,position`];
-  for (const r of rows) lines.push([csvCell(r.keys[0]), r.clicks, r.impressions, r.ctr.toFixed(4), r.position.toFixed(1)].join(","));
+  const base = { query: "queries", page: "pages", "query-page": "query-pages" }[dimension];
+  const out = join(OUT_DIR, `${base}-${stamp()}.csv`);
+  const lines = [`${dimension === "query-page" ? "query,page" : dimension},clicks,impressions,ctr,position`];
+  for (const r of rows) lines.push([...r.keys.map(csvCell), r.clicks, r.impressions, r.ctr.toFixed(4), r.position.toFixed(1)].join(","));
   writeFileSync(out, lines.join("\n"));
   console.log(`${rows.length} rows (${fmt(start)}..${fmt(end)}) -> ${out}`);
 
@@ -185,8 +192,9 @@ switch (cmd) {
   case "auth": await auth(); break;
   case "queries": await searchAnalytics("query"); break;
   case "pages": await searchAnalytics("page"); break;
+  case "query-pages": await searchAnalytics("query-page"); break;
   case "coverage": await coverage(); break;
   default:
-    console.log("usage: bun scripts/gsc.ts auth | queries [--days=28] | pages [--days=28] | coverage");
+    console.log("usage: bun scripts/gsc.ts auth | queries | pages | query-pages [--days=28] [--daily] | coverage");
     process.exit(1);
 }

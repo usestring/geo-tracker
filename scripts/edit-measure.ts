@@ -40,6 +40,9 @@ const LATE_TOLERANCE_DAYS = 14;
 const LOW_BASE_CLICKS = 10;
 
 const db = new Database(DB_PATH);
+// Wait on a locked database instead of throwing SQLITE_BUSY: a review run,
+// extract and a tracker pass can overlap on the same file.
+db.run("PRAGMA busy_timeout = 30000");
 db.run(`CREATE TABLE IF NOT EXISTS edits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   url TEXT NOT NULL,
