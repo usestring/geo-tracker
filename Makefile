@@ -30,13 +30,26 @@ retry:
 # Both surfaces always run. run-apps exits 2 when a surface alerts, and
 # without the leading `-` make would stop after google-ai-mode and never ask
 # google-aio. Read the ALERT lines in the output, not the exit code.
+#
+# Both Google surfaces, SERP_SHARDS processes each, side by side (search
+# endpoint only; GOOGLE_VIA_BROWSER=1 falls back to one process per surface, in
+# turn). GOOGLE_DELAY_MS (default 500) is the gap between endpoint requests.
+SERP_SHARDS ?= 3
+define run_serp
+	-@if [ "$$GOOGLE_VIA_BROWSER" = "1" ]; then \
+	  bun scripts/run-apps.ts --only=google-ai-mode $(1); bun scripts/run-apps.ts --only=google-aio $(1); \
+	else \
+	  pids=""; for s in google-ai-mode google-aio; do i=0; while [ $$i -lt $(SERP_SHARDS) ]; do \
+	    bun scripts/run-apps.ts --only=$$s $(1) --shard=$$i/$(SERP_SHARDS) & pids="$$pids $$!"; i=$$((i+1)); done; done; \
+	  rc=0; for p in $$pids; do wait $$p || rc=1; done; exit $$rc; \
+	fi
+endef
+
 serp-core:
-	-bun scripts/run-apps.ts --only=google-ai-mode --core
-	-bun scripts/run-apps.ts --only=google-aio --core
+	$(call run_serp,--core)
 
 serp:
-	-bun scripts/run-apps.ts --only=google-ai-mode
-	-bun scripts/run-apps.ts --only=google-aio
+	$(call run_serp,)
 
 # --- tests ------------------------------------------------------------------
 # Fakes the hosted browser, so no network and no browser credits are spent.
@@ -165,6 +178,13 @@ competitors:
 gsc-auth:
 	bun scripts/gsc.ts auth
 
+# Are pages published or edited in the last 30 days indexed by Google yet?
+# URL-inspects every URL in `edits` (make edit-enroll) since then, plus any
+# URLs passed as URLS="..."; STALE = not indexed 7+ days after the edit.
+# Writes data/gsc/index-check-YYYYMMDD.json.
+index-check:
+	bun scripts/gsc.ts index-check $(URLS)
+
 gsc:
 	bun scripts/gsc.ts queries
 	bun scripts/gsc.ts pages
@@ -191,6 +211,13 @@ search-feedback:
 opportunity:
 	bun scripts/opportunity.ts
 
+# Page-two pages (GSC position 10.5-20.5) and the live sibling paragraphs that
+# mention their subject without linking to them, plus unindexed sitemap URLs
+# with their inbound-link count. Reads your site's markdown content from git
+# (LANDING_DIR, CONTENT_DIRS, CONTENT_REF in .env). Weekly, after `make gsc`.
+internal-links:
+	bun scripts/internal-links.ts
+
 # Per-edit measurement: enroll a page the day an edit ships, read the +28d and
 # +56d numbers when due. The reported number is the control-adjusted lift -
 # page clicks change minus rest-of-site clicks change - so a rising tide reads
@@ -215,4 +242,4 @@ backup:
         content-coverage competitors gsc-auth gsc backup test \
         rank routing objections sentiment robots-audit weekly-measure daily-report \
         opportunity edit-enroll edit-read edit-report \
-        gsc-daily search-feedback competitor-posts daily-picks
+        gsc-daily search-feedback competitor-posts daily-picks index-check internal-links

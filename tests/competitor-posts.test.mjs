@@ -3,7 +3,8 @@
 // intent, when one of your slugs already answers it, and the either-list priority.
 import { describe, expect, test } from "bun:test";
 import {
-  intentKey, isNearIntent, normalizeUrl, ownerIn, pageTypeOf, rankEitherList, slugAnswersIntent, templateOf
+  intentKey, isNearIntent, normalizeUrl, ownerIn, pageTypeOf, rankEitherList, slugAnswersIntent, stem, templateOf,
+  AI_MODE_COUNTS_FROM, countsInRanking, rankedSurfaces
 } from "../scripts/lib/competitor-posts.ts";
 
 describe("normalizeUrl", () => {
@@ -75,6 +76,20 @@ describe("slugAnswersIntent", () => {
   test("one shared word is not enough", () => {
     expect(slugAnswersIntent("scraping", listicle)).toBe(false);
   });
+  test("word forms match: bypass answers bypassing", () => {
+    const intent = intentKey("/blog/bypassing-cloudflare-anti-bot-protection-for-ai-web-scraping-at-scale").split(" ");
+    expect(slugAnswersIntent("bypass-cloudflare", intent)).toBe(true);
+  });
+  test("word forms match: scrape-without-getting-blocked answers web-scraping-without-getting-blocked", () => {
+    const intent = intentKey("/blog/web-data/web-scraping-without-getting-blocked").split(" ");
+    expect(slugAnswersIntent("scrape-without-getting-blocked", intent)).toBe(true);
+  });
+  test("a how-to page does not answer a product listicle", () => {
+    expect(slugAnswersIntent("how-to-scrape-zillow", intentKey("/blog/web-data/best-zillow-scrapers").split(" "))).toBe(false);
+  });
+  test("stemming does not let a pricing page answer the listicle", () => {
+    expect(slugAnswersIntent("web-scraping-api-pricing", listicle)).toBe(false);
+  });
 });
 
 describe("rankEitherList", () => {
@@ -106,5 +121,36 @@ describe("isNearIntent", () => {
     expect(isNearIntent("web-scraping-benchmark-problem", "/blog/best-web-scraping-tools")).toBe(false);
     expect(templateOf("acme-vs-bright-data")).toBe("vs");
     expect(isNearIntent("acme-vs-bright-data", "/blog/bright-data-alternatives")).toBe(false);
+  });
+});
+
+describe("stem", () => {
+  test("collapses common word forms", () => {
+    expect(["scrape", "scraping"].map(stem)).toEqual(["scrap", "scrap"]);
+    expect(stem("scraper")).toBe("scraper");
+    expect(["getting", "get"].map(stem)).toEqual(["get", "get"]);
+    expect(["bypassing", "bypass"].map(stem)).toEqual(["bypass", "bypass"]);
+    expect(stem("blocked")).toBe("block");
+  });
+});
+
+// AI Mode rows count from the search-endpoint era once the window reaches
+// AI_MODE_COUNTS_FROM (default 2026-10-19; the defaults are pinned here).
+describe("countsInRanking", () => {
+  const row = (surface, day, serpState = "answer") => ({ surface, day, serpState });
+  test("AI Mode counts only from the endpoint era, once the window reaches the cutover", () => {
+    expect(AI_MODE_COUNTS_FROM).toBe("2026-10-19");
+    expect(countsInRanking(row("google-ai-mode", "2026-10-19"), "2026-10-19")).toBe(true);
+    expect(countsInRanking(row("google-ai-mode", "2026-09-28"), "2026-10-19")).toBe(false);
+    expect(countsInRanking(row("google-ai-mode", "2026-10-18"), "2026-10-18")).toBe(false);
+  });
+  test("Google surfaces need a rendered answer; API surfaces always count", () => {
+    expect(countsInRanking(row("google-aio", "2026-10-19", "shell"), "2026-10-19")).toBe(false);
+    expect(countsInRanking(row("google-aio", "2026-10-19"), "2026-10-19")).toBe(true);
+    expect(countsInRanking(row("gpt", "2026-10-19", null), "2026-10-19")).toBe(true);
+  });
+  test("rankedSurfaces adds google-ai-mode from the cutover", () => {
+    expect(rankedSurfaces("2026-10-18")).not.toContain("google-ai-mode");
+    expect(rankedSurfaces("2026-10-19")).toContain("google-ai-mode");
   });
 });

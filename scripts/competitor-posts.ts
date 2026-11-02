@@ -11,8 +11,9 @@
 // this from the database.
 //
 // Data hygiene: latest row per question x model x day; API surfaces plus
-// google-aio rows where Google actually showed an answer; google-ai-mode
-// excluded (its browser-path citations undercount); discovery questions only
+// google-aio rows where Google actually showed an answer; google-ai-mode rows
+// from the search endpoint once the window reaches AI_MODE_COUNTS_FROM (before
+// that, excluded: its browser-path citations undercount); discovery questions only
 // (cat:company and validation/sentiment/market-perception rows excluded).
 // bySurface shows each surface's share per page, so a surface that read zero
 // citations for part of the window is visible.
@@ -29,7 +30,8 @@ import { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  intentKey, isNearIntent, normalizeUrl, ownerIn, pageTypeOf, rankEitherList, slugAnswersIntent, slugTokens, type PageType
+  AI_MODE_COUNTS_FROM, AI_MODE_ENDPOINT_SINCE, countsInRanking, intentKey, isNearIntent, normalizeUrl, ownerIn,
+  pageTypeOf, rankEitherList, rankedSurfaces, slugAnswersIntent, slugTokens, type PageType
 } from "./lib/competitor-posts.ts";
 import { BRAND_NAME, BRAND_SITE, isOwnDomain } from "./brand.ts";
 
@@ -38,7 +40,6 @@ const OUT_PATH = join(import.meta.dir, "..", "data", "competitor-posts.json");
 const QUEUE_PATH = process.env.CONTENT_QUEUE_PATH ?? "";
 const SITEMAP_URL = process.env.SITE_SITEMAP ?? `${BRAND_SITE}/sitemap.xml`;
 const WINDOW_DAYS = 28;
-const SURFACES = ["gpt", "claude", "perplexity", "gemini", "google-aio"];
 const NON_DISCOVERY = /cat:company|type:(validation|sentiment|market-perception)/;
 const CONTENT_TYPES: PageType[] = ["article", "comparison", "docs"];
 
@@ -52,19 +53,21 @@ const shift = (d: string, n: number) => new Date(Date.parse(d + "T00:00:00Z") + 
 const start = shift(end, -(WINDOW_DAYS - 1));
 const prevStart = shift(start, -WINDOW_DAYS);
 const prevEnd = shift(start, -1);
+const aiMode = end >= AI_MODE_COUNTS_FROM;
+const SURFACES = rankedSurfaces(end);
 
-interface Row { id: number; model: string; qid: number; tags: string; citations: string | null; competitors: string | null; d: string }
-const rows = db.query(`
+interface Row { id: number; model: string; qid: number; tags: string; citations: string | null; competitors: string | null; d: string; serp_state: string | null }
+const rows = (db.query(`
   WITH latest AS (
     SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.question_id, r.model, date(r.run_ts) ORDER BY r.run_ts DESC) rn
     FROM runs r WHERE date(r.run_ts) BETWEEN ?1 AND ?2
   )
-  SELECT l.id, l.model, l.question_id qid, q.tags, l.citations, m.competitors, date(l.run_ts) d
+  SELECT l.id, l.model, l.question_id qid, q.tags, l.citations, m.competitors, date(l.run_ts) d, l.serp_state
   FROM latest l JOIN questions q ON q.id = l.question_id
   LEFT JOIN mentions m ON m.run_id = l.id AND m.brand = ?3
   WHERE l.rn = 1 AND l.error IS NULL
-    AND (l.model IN ('gpt','claude','perplexity','gemini') OR (l.model = 'google-aio' AND l.serp_state = 'answer'))
-`).all(prevStart, end, BRAND_NAME.toLowerCase()) as Row[];
+`).all(prevStart, end, BRAND_NAME.toLowerCase()) as Row[])
+  .filter((r) => countsInRanking({ surface: r.model, serpState: r.serp_state, day: r.d }, end));
 
 const cls = new Map<string, string>();
 for (const r of db.query("SELECT domain, classification FROM domains").all() as { domain: string; classification: string }[]) {
@@ -253,7 +256,7 @@ const out = {
   currentDaysWithData: curDays,
   method: {
     surfaces: SURFACES,
-    rows: "latest row per question x model x day; error-free; google-aio only where Google showed an AI answer; google-ai-mode excluded",
+    rows: `latest row per question x model x day; error-free; google-aio only where Google showed an AI answer; google-ai-mode ${aiMode ? `included from ${AI_MODE_ENDPOINT_SINCE} (search endpoint)` : `excluded until ${AI_MODE_COUNTS_FROM}`}`,
     questions: "discovery only: cat:company and type:validation/sentiment/market-perception excluded",
     citations: "answers that cite the page (one answer counts once per page)",
     mentions: "citing answers that also name the page's owner, from mentions.competitors; null when the extractor does not track the owner",
