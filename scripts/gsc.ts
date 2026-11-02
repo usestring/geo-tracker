@@ -5,6 +5,11 @@
 //   bun scripts/gsc.ts pages   [--days=28]   page performance -> data/gsc/pages-YYYYMMDD.csv
 //   bun scripts/gsc.ts query-pages [--days=28]  query x page -> data/gsc/query-pages-YYYYMMDD.csv
 //   bun scripts/gsc.ts coverage              URL-inspect every sitemap URL -> data/gsc/coverage-YYYYMMDD.csv
+//   bun scripts/gsc.ts index-check [--window=30] [--min-age=7] [url ...]
+//                                            URL-inspect pages published or edited in the last
+//                                            --window days (the `edits` table) plus any URLs given;
+//                                            flags pages still not indexed --min-age days after the
+//                                            edit -> data/gsc/index-check-YYYYMMDD.json
 //
 // --daily writes to data/gsc/daily/ instead. The weekly scripts
 // (opportunity.ts compares the latest pull with the second-latest) read only the
@@ -26,6 +31,7 @@
 import { join } from "node:path";
 import { BRAND_DOMAIN, BRAND_SITE } from "./brand.ts";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { Database } from "bun:sqlite";
 
 const PROPERTY = process.env.GSC_PROPERTY || `sc-domain:${BRAND_DOMAIN}`;
 // Both sitemaps: the marketing site and the docs. sc-domain covers every subdomain.
@@ -188,13 +194,71 @@ async function coverage() {
   console.log(`\n${results.length} inspected, ${notIndexed.length} not indexed -> ${out}`);
 }
 
+// --- index-check: are recently published pages in Google yet? ------------------
+// Google has no API to *request* indexing for normal pages (the Indexing API is
+// limited to job postings and livestreams), so you request it by hand in Search
+// Console. This checks the result: every URL enrolled in `edits` (make
+// edit-enroll) within --window days is URL-inspected, and a page still not
+// indexed --min-age days after its edit date is flagged STALE.
+async function indexCheck() {
+  const windowDays = Number(argOf("window")) || 30;
+  const minAge = Number(argOf("min-age")) || 7;
+  const extra = process.argv.slice(3).filter((a) => /^https?:\/\//.test(a));
+  const dbPath = join(import.meta.dir, "..", "data", "geo.db");
+  const since = new Date(Date.now() - windowDays * 86400e3).toISOString().slice(0, 10);
+  let rows: { url: string; edit_date: string; note: string }[] = [];
+  if (existsSync(dbPath)) {
+    const db = new Database(dbPath, { readonly: true });
+    const hasEdits = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'edits'`).get();
+    if (hasEdits) rows = db.query(`SELECT url, MAX(edit_date) AS edit_date, note FROM edits WHERE edit_date >= ? GROUP BY url ORDER BY edit_date DESC`).all(since) as typeof rows;
+    db.close();
+  }
+  const byUrl = new Map(rows.map((r) => [r.url, r]));
+  for (const u of extra) if (!byUrl.has(u)) byUrl.set(u, { url: u, edit_date: "", note: "given on the command line" });
+  if (byUrl.size === 0) { console.log(`no edits since ${since} and no URLs given`); return; }
+
+  const token = await accessToken();
+  const healthy = /^(submitted and indexed|indexed, not submitted in sitemap)$/i;
+  const today = new Date().toISOString().slice(0, 10);
+  const results: any[] = [];
+  console.log(`${byUrl.size} URLs (edits since ${since}${extra.length ? ` + ${extra.length} given` : ""}); STALE = not indexed ${minAge}+ days after the edit`);
+  for (const { url, edit_date, note } of byUrl.values()) {
+    const age = edit_date ? Math.floor((Date.parse(today) - Date.parse(edit_date)) / 86400e3) : null;
+    let res: Response;
+    try {
+      res = await fetch("https://searchconsole.googleapis.com/v1/urlInspection/index:inspect", {
+        method: "POST", signal: AbortSignal.timeout(60000),
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ inspectionUrl: url, siteUrl: PROPERTY }),
+      });
+    } catch (e) { res = new Response(String(e), { status: 599 }); }
+    let state = "", lastCrawl = "", verdict = "";
+    if (!res.ok) { verdict = `HTTP ${res.status}`; state = (await res.text()).slice(0, 120); }
+    else {
+      const r = ((await res.json()) as any).inspectionResult?.indexStatusResult ?? {};
+      state = r.coverageState ?? ""; lastCrawl = r.lastCrawlTime ?? ""; verdict = r.verdict ?? "";
+    }
+    const indexed = healthy.test(state);
+    const stale = !indexed && !verdict.startsWith("HTTP") && age !== null && age >= minAge;
+    results.push({ url, editDate: edit_date, ageDays: age, indexed, stale, coverageState: state, lastCrawl, verdict, note });
+    console.log(`  ${(stale ? "STALE " : indexed ? "ok    " : "wait  ")}${String(age ?? "-").padStart(3)}d  ${state.padEnd(38)} ${url}`);
+    await Bun.sleep(300);
+  }
+  mkdirSync(OUT_DIR, { recursive: true });
+  const out = join(OUT_DIR, `index-check-${stamp()}.json`);
+  writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), windowDays, minAge, results }, null, 2));
+  const stale = results.filter((r) => r.stale);
+  console.log(`\n${results.length} checked, ${results.filter((r) => r.indexed).length} indexed, ${stale.length} STALE -> ${out}`);
+}
+
 switch (cmd) {
   case "auth": await auth(); break;
   case "queries": await searchAnalytics("query"); break;
   case "pages": await searchAnalytics("page"); break;
   case "query-pages": await searchAnalytics("query-page"); break;
   case "coverage": await coverage(); break;
+  case "index-check": await indexCheck(); break;
   default:
-    console.log("usage: bun scripts/gsc.ts auth | queries | pages | query-pages [--days=28] [--daily] | coverage");
+    console.log("usage: bun scripts/gsc.ts auth | queries | pages | query-pages [--days=28] [--daily] | coverage | index-check [--window=30] [--min-age=7] [url ...]");
     process.exit(1);
 }

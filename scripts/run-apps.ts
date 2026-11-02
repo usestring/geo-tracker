@@ -318,8 +318,26 @@ const answeredToday = new Set<string>(
 
 // The bank a surface draws from, and the part of it still owed today.
 const bankFor = (s: Surface) => (s.allQuestions ? bankQuestions : questions);
+// --shard=i/n: ask only questions whose id % n === i. Google surfaces only, and
+// only on the search endpoint, which is stateless: `make serp` runs several
+// shards per surface side by side (one request at a time made the Google half
+// of a full bank take hours). Logged-in app surfaces never shard.
+const SHARD = (() => {
+  const raw = process.argv.find((a) => a.startsWith("--shard="))?.split("=")[1];
+  if (!raw) return null;
+  const [i, n] = raw.split("/").map(Number);
+  if (!Number.isInteger(i) || !Number.isInteger(n) || n < 1 || i < 0 || i >= n) {
+    console.error(`run-apps: bad --shard=${raw} (want i/n with 0 <= i < n)`);
+    process.exit(1);
+  }
+  return { i, n };
+})();
+const shardable = (s: Surface) => s.model.startsWith("google-") && !VIA_BROWSER;
+const inShard = (s: Surface, q: { id: number }) => !SHARD || !shardable(s) || q.id % SHARD.n === SHARD.i;
+// This process's slice of the bank: the whole bank unless sharded.
+const shardBank = (s: Surface) => bankFor(s).filter((q) => inShard(s, q));
 const pendingFor = (s: Surface) =>
-  bankFor(s).filter((q) => !answeredToday.has(`${q.id}|${s.model}`));
+  shardBank(s).filter((q) => !answeredToday.has(`${q.id}|${s.model}`));
 
 // Cadence guard: how long since this surface last ran a real PASS.
 // Two deliberate exclusions:
@@ -363,7 +381,7 @@ if (DRY_RUN) {
       `  ${s.model}: last run ${since === null ? "never" : `${since.toFixed(1)}d ago`}` +
         (s.loggedIn ? `, min gap ${MIN_CHATGPT_GAP_DAYS}d` : ", no cadence limit")
     );
-    const total = bankFor(s).length;
+    const total = shardBank(s).length;
     const todo = pendingFor(s);
     // Name the pending ids only on a partial day - that is the recovery case
     // worth eyeballing before spending browser credits. A full bank is just the
@@ -404,7 +422,7 @@ for (const surface of selected) {
     }
   }
 
-  const total = bankFor(surface).length;
+  const total = shardBank(surface).length;
   const pending = pendingFor(surface);
   if (pending.length < total) {
     console.log(
@@ -581,7 +599,12 @@ for (const surface of selected) {
           break;
         }
       }
-      await Bun.sleep(DELAY_MS[surface.model as keyof typeof DELAY_MS] ?? 5000);
+      // The 5 s gap protected the browser path from Google blocks. The search
+      // endpoint is not blocked, so the Google surfaces wait GOOGLE_DELAY_MS.
+      await Bun.sleep(
+        DELAY_MS[surface.model as keyof typeof DELAY_MS] ??
+          (shardable(surface) ? Number(process.env.GOOGLE_DELAY_MS ?? 500) : 5000)
+      );
     }
   } catch (error: any) {
     failures++;

@@ -75,15 +75,31 @@ export function slugTokens(slugOrPath: string): string[] {
 export const intentKey = (path: string) => slugTokens(path).join(" ");
 
 /**
+ * Word form for matching one of your slugs to an intent, never for grouping
+ * intents: "bypass-cloudflare" answers "bypassing cloudflare", and
+ * "scrape-without-getting-blocked" answers "web scraping without getting
+ * blocked". "-er" is left alone on purpose: "best zillow scrapers" is a product
+ * listicle, and a how-to-scrape-zillow page does not answer it.
+ */
+export function stem(word: string): string {
+  let w = word;
+  if (w.length > 5 && w.endsWith("ing")) w = w.slice(0, -3);
+  else if (w.length > 4 && w.endsWith("ed")) w = w.slice(0, -2);
+  else if (w.length > 4 && w.endsWith("e")) w = w.slice(0, -1);
+  if (/([b-df-hj-np-tv-z])\1$/.test(w) && !w.endsWith("ss")) w = w.slice(0, -1);
+  return w;
+}
+
+/**
  * Does one of your slugs answer this intent? Your slug is the narrower label,
  * so its tokens must all appear in the intent (bypass-cloudflare answers
  * "how to bypass cloudflare scraping"), and it needs two tokens unless the sets
  * are equal. web-scraping-api-pricing does NOT answer "best web scraping apis".
  */
 export function slugAnswersIntent(ownSlug: string, intentTokens: string[]): boolean {
-  const s = slugTokens(ownSlug);
+  const s = [...new Set(slugTokens(ownSlug).map(stem))];
   if (s.length === 0 || intentTokens.length === 0) return false;
-  const set = new Set(intentTokens);
+  const set = new Set(intentTokens.map(stem));
   if (!s.every((t) => set.has(t))) return false;
   return s.length >= 2 || s.length === intentTokens.length;
 }
@@ -137,4 +153,28 @@ export function isNearIntent(ownSlug: string, competitorPath: string): boolean {
   const union = new Set([...a, ...b]).size;
   if (union === 0) return false;
   return shared / union >= (t === "other" ? 0.75 : 0.5);
+}
+
+// AI Mode sources come back as real page URLs from the search endpoint, so the
+// browser-path undercount does not apply to those rows. They join the ranking
+// for windows ending on or after AI_MODE_COUNTS_FROM, and only rows from
+// AI_MODE_ENDPOINT_SINCE on count. Both dates are overridable in .env; set them
+// to the day you first ran the Google surfaces on the endpoint.
+export const AI_MODE_COUNTS_FROM = process.env.AI_MODE_COUNTS_FROM ?? "2026-10-19";
+export const AI_MODE_ENDPOINT_SINCE = process.env.AI_MODE_ENDPOINT_SINCE ?? "2026-09-29";
+
+/** The surfaces the ranking counts for a window ending on `end` (UTC day). */
+export const rankedSurfaces = (end: string) =>
+  ["gpt", "claude", "perplexity", "gemini", "google-aio", ...(end >= AI_MODE_COUNTS_FROM ? ["google-ai-mode"] : [])];
+
+/**
+ * Does a latest-per-day row count toward a window ending on `end`? API surfaces
+ * always; Google surfaces only where Google showed an AI answer, and AI Mode only
+ * from the endpoint era once the window reaches AI_MODE_COUNTS_FROM.
+ */
+export function countsInRanking(r: { surface: string; serpState: string | null; day: string }, end: string): boolean {
+  if (["gpt", "claude", "perplexity", "gemini"].includes(r.surface)) return true;
+  if (r.serpState !== "answer") return false;
+  if (r.surface === "google-aio") return true;
+  return r.surface === "google-ai-mode" && end >= AI_MODE_COUNTS_FROM && r.day >= AI_MODE_ENDPOINT_SINCE;
 }

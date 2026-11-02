@@ -84,11 +84,13 @@ Seven more measurements sit on top of the same data, each behind its own make ta
 
 Three more read the GSC pulls instead of the answer data. `make opportunity` ranks pages by the clicks a fix would earn - a recover / CTR / rank lever per page, plus near-miss queries - as an ordering, not a forecast. `make edit-enroll URL=... NOTE=...` snapshots a page the day an edit ships; `make edit-read` takes the +28d and +56d readings when due, reporting the control-adjusted lift against the rest of the site, so a rising tide reads as zero. `make search-feedback` writes `data/search-feedback.json` with six lists: pages with real impressions and a low click rate, non-branded queries at positions 8 to 20, pages that lost 30% or more against a pull at least 7 days older, new non-branded queries not in your bank, queries split across two of your pages or served by the homepage, and pages that still earn impressions but no longer return 2xx/3xx. `make gsc-daily` pulls into `data/gsc/daily/` so the weekly scripts keep comparing week over week. Set `SEARCH_BRANDED_TERMS` and `SEARCH_CATEGORY_TERMS` in `.env` to tune what counts as branded and as a category query. And `make daily-report` renders a one-page daily HTML report: run health per surface, today's mention rate against the 7-day average, and a banner for any surface that produced zero clean rows.
 
+`make index-check` URL-inspects every page enrolled with `make edit-enroll` in the last 30 days (plus any `URLS="..."` you pass) and flags a page STALE when Google has not indexed it 7 or more days after the edit. Google has no API to request indexing for normal pages, so you request it by hand in Search Console; this checks whether that worked. Output goes to `data/gsc/index-check-YYYYMMDD.json`. `make internal-links` lists your pages that sit on page two in Search Console (position 10.5 to 20.5 on 50+ impressions) and, for each, the live sibling paragraphs that mention its subject but do not link to it, plus unindexed sitemap URLs with their inbound-link count. It reads your site's markdown source from git; set `LANDING_DIR`, `CONTENT_DIRS` and `SITE_URL` in `.env`. Nothing edits a page.
+
 ### What to write next
 
 Two rankings turn the data into a writing order.
 
-`make competitor-posts` ranks the competitor and affiliate pages the engines cite, and how often the citing answer also names the competitor who wrote the page. It groups pages by the search intent their slug answers and matches each intent to your own page: live (in your sitemap), drafted or queued (a row in the optional `CONTENT_QUEUE_PATH` table), or none. A topic leads when it ranks high on citations or on mentions. The dashboard shows it as a card at the top, and `make dashboard` runs it first.
+`make competitor-posts` ranks the competitor and affiliate pages the engines cite, and how often the citing answer also names the competitor who wrote the page. It groups pages by the search intent their slug answers and matches each intent to your own page: live (in your sitemap), drafted or queued (a row in the optional `CONTENT_QUEUE_PATH` table), or none. Your slug matches an intent across word forms, so `bypass-cloudflare` answers "bypassing cloudflare"; `-er` is left alone, so a how-to page never answers a "best X scrapers" listicle. `google-ai-mode` rows from the search endpoint join the ranking for windows ending on or after `AI_MODE_COUNTS_FROM`. A topic leads when it ranks high on citations or on mentions. The dashboard shows it as a card at the top, and `make dashboard` runs it first.
 
 `make daily-picks` ranks the bank questions you are losing: lost answers in the last 14 days, times the `prio:` weight, times the content-coverage verdict. Questions that resolve to the same page are summed into one pick, and each pick carries an action: new page, refresh, draft a queued row, or a waiting state. It needs `make content-coverage` first. It reads page ownership from the content queue, `bankIds` front matter in `CONTENT_DIR` and `DRAFTS_DIR`, and pages of yours the engines cited.
 
@@ -141,7 +143,7 @@ Blocks come in waves that last minutes, not hours. On the browser path the runne
 
 Google folds some sources behind `/goto` tokens. The browser path resolves each token with one cookie-less GET that reads the redirect `Location` and never loads the page, so folded sources count as pages. `GOOGLE_RESOLVE_GOTO=0` turns it off.
 
-Run either path with `make serp-core` for the daily subset or `make serp` for the full bank. Both resume, so a re-run only retries what failed. Both surfaces always run, even when the first one raises an alert. `bun scripts/probe-google.mjs` is the first thing to reach for when the browser path starts coming back blocked; it now takes repeated samples per egress config.
+Run either path with `make serp-core` for the daily subset or `make serp` for the full bank. Both resume, so a re-run only retries what failed. Both surfaces always run, even when the first one raises an alert. On the search endpoint, `make serp` runs `SERP_SHARDS` processes per surface side by side (default 3, each asking the questions whose id modulo the shard count matches) and waits `GOOGLE_DELAY_MS` (default 500) between requests; the browser path runs one process per surface, in turn. `bun scripts/probe-google.mjs` is the first thing to reach for when the browser path starts coming back blocked; it now takes repeated samples per egress config.
 
 ## Tests
 
@@ -160,6 +162,8 @@ Extraction is two model passes over the stored answers. Haiku decides whether yo
 ## Cost control
 
 Asking every question across every surface daily is more measurement than the signal justifies. Split the bank instead: tag your highest-value questions `tier:daily` and run those Monday through Saturday with `make run-core`, then run the full bank on Sunday with `make run`. Consumer apps and the competitor diff run weekly.
+
+The four engine APIs run side by side, each with its own worker pool: `ENGINE_CONCURRENCY` (default 4) for GPT and Claude, `PERPLEXITY_CONCURRENCY` and `GEMINI_CONCURRENCY` (default 2, since both rate-limit sooner). Gemini also waits 7 seconds per worker between calls. Set all three to 1 for the old one-at-a-time order.
 
 Every runner resumes. A question answered cleanly today is skipped, so a re-run retries failures and nothing else. `--force` asks everything again.
 

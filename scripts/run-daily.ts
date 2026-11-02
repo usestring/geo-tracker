@@ -449,19 +449,45 @@ async function attempt(
   }
 }
 
-for (const question of questions) {
-  for (const { model, adapter } of configured) {
-    if (FAILED_TODAY && !failedPairs.has(`${question.id}|${model}`)) continue;
-    if (doneToday.has(`${question.id}|${model}`)) continue;
-    // The Anthropic surface goes through the batch submitted above; only fall
-    // through to a live call when batching is off or the batch left it behind.
-    if (model === "claude" && batchingClaude) continue;
-    await attempt(question, model, adapter, true);
-    // Gemini paid tier still rate-limits; pace it win or lose so a pass never
-    // 429-storms. Applied once here rather than in both branches.
-    await Bun.sleep(model === "gemini" ? 7000 : 500);
-  }
+// Engines run side by side, each with its own small worker pool. Asking one
+// engine at a time made a full bank take hours (~60 s a question across four
+// engines). The four providers have separate rate limits, so one engine's wait
+// no longer blocks the others. Gemini keeps its 7 s pace per worker and a
+// smaller pool because its paid tier still 429s; transient failures still go to
+// the deferred sweep below. ENGINE_CONCURRENCY=1 PERPLEXITY_CONCURRENCY=1
+// GEMINI_CONCURRENCY=1 restores the old one-at-a-time order.
+//
+// Measured on a core pass at 4 workers each: GPT and Claude clean, Perplexity
+// retried on 429 and deferred some questions, so Perplexity defaults to 2.
+const ENGINE_CONCURRENCY = Math.max(1, Number(process.env.ENGINE_CONCURRENCY ?? 4));
+const PERPLEXITY_CONCURRENCY = Math.max(1, Number(process.env.PERPLEXITY_CONCURRENCY ?? 2));
+const GEMINI_CONCURRENCY = Math.max(1, Number(process.env.GEMINI_CONCURRENCY ?? 2));
+
+async function runEngine(model: string, adapter: Adapter) {
+  // The Anthropic surface goes through the batch submitted above; only fall
+  // through to a live call when batching is off or the batch left it behind.
+  if (model === "claude" && batchingClaude) return;
+  const todo = questions.filter(
+    (q) =>
+      (!FAILED_TODAY || failedPairs.has(`${q.id}|${model}`)) && !doneToday.has(`${q.id}|${model}`)
+  );
+  let next = 0;
+  const workers =
+    model === "gemini" ? GEMINI_CONCURRENCY : model === "perplexity" ? PERPLEXITY_CONCURRENCY : ENGINE_CONCURRENCY;
+  await Promise.all(
+    Array.from({ length: Math.min(workers, todo.length) }, async () => {
+      while (next < todo.length) {
+        const question = todo[next++];
+        await attempt(question, model, adapter, true);
+        // Gemini paid tier still rate-limits; pace it win or lose so a pass
+        // never 429-storms. Applied per worker.
+        await Bun.sleep(model === "gemini" ? 7000 : 500);
+      }
+    })
+  );
 }
+
+await Promise.all(configured.map(({ model, adapter }) => runEngine(model, adapter)));
 
 // Collect the batch, write what came back, and ask anything it left behind the
 // normal way. An expired or canceled request is absent from the map, so the
